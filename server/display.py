@@ -34,6 +34,8 @@ class DisplayManager:
         self._xvfb_process: subprocess.Popen | None = None
         self._dbus_process: subprocess.Popen | None = None
         self._atspi_process: subprocess.Popen | None = None
+        self._vnc_process: subprocess.Popen | None = None
+        self._vnc_display: str | None = None
         self._display: str | None = None
         self._display_mode: str | None = None
         self._dbus_address: str | None = None
@@ -85,9 +87,88 @@ class DisplayManager:
         logger.info(f"Display session started: {self._display}")
         return self._display
 
+    def start_vnc(self, port: int = 0) -> str:
+        """Start x11vnc in view-only mode for operator observation.
+
+        Args:
+            port: VNC port (0 = auto-select). VNC viewers connect to this port.
+
+        Returns the VNC display string (e.g. "localhost:5900").
+        """
+        if self._vnc_process is not None:
+            if self._vnc_process.poll() is None:
+                return self._vnc_display
+            self._vnc_process = None
+
+        if not shutil.which("x11vnc"):
+            logger.warning("x11vnc not found; VNC observation not available. Install: sudo apt install x11vnc")
+            return None
+
+        args = [
+            "x11vnc",
+            "-display", self._display,
+            "-viewonly",
+            "-shared",
+            "-nopw",
+            "-forever",
+            "-noxdamage",
+            "-q",
+        ]
+        if port > 0:
+            args.extend(["-rfbport", str(port)])
+        else:
+            args.extend(["-autoport", "5900"])
+
+        self._vnc_process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give x11vnc a moment to bind
+        time.sleep(0.5)
+        if self._vnc_process.poll() is not None:
+            logger.warning("x11vnc exited immediately; VNC not available")
+            self._vnc_process = None
+            return None
+
+        # Determine the port — read from /proc or parse output
+        actual_port = port if port > 0 else self._detect_vnc_port()
+        self._vnc_display = f"localhost:{actual_port}"
+        logger.info(f"x11vnc started: {self._vnc_display} (view-only)")
+        return self._vnc_display
+
+    def _detect_vnc_port(self) -> int:
+        """Detect the port x11vnc bound to."""
+        if self._vnc_process is None:
+            return 5900
+        # Check /proc/<pid>/net/tcp for listening ports
+        try:
+            import re
+            with open(f"/proc/{self._vnc_process.pid}/net/tcp") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 4 and parts[3] == "0A":  # LISTEN state
+                        port = int(parts[1].split(":")[1], 16)
+                        if port >= 5900:
+                            return port
+        except Exception:
+            pass
+        return 5900
+
+    @property
+    def vnc_running(self) -> bool:
+        return self._vnc_process is not None and self._vnc_process.poll() is None
+
+    @property
+    def vnc_display(self) -> str | None:
+        if self.vnc_running:
+            return self._vnc_display
+        return None
+
     def stop(self) -> None:
-        """Stop all managed processes (AT-SPI, D-Bus, Xvfb if owned) in reverse order."""
+        """Stop all managed processes (VNC, AT-SPI, D-Bus, Xvfb) in reverse order."""
         for name, proc_attr in [
+            ("x11vnc", "_vnc_process"),
             ("at-spi2-registryd", "_atspi_process"),
             ("dbus-daemon", "_dbus_process"),
             ("Xvfb", "_xvfb_process"),
@@ -99,6 +180,7 @@ class DisplayManager:
         self._display = None
         self._display_mode = None
         self._dbus_address = None
+        self._vnc_display = None
         self._warnings = []
 
     @property

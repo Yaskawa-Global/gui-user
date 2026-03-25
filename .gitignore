@@ -27,3 +27,4 @@ Thumbs.db
 *.sock
 /tmp/
 screenshots/
+.gui-user/

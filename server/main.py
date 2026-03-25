@@ -9,6 +9,7 @@ All logging must go to stderr or a file.
 """
 
 import asyncio
+import base64
 import functools
 import logging
 import os
@@ -45,11 +46,13 @@ mcp = FastMCP("gui-user")
 
 # ---------------------------------------------------------------------------
 # Session management
+#
+# Display session is long-lived (persists across app launch/close cycles).
+# App state is short-lived (created per launch_app, cleared on close_app).
 # ---------------------------------------------------------------------------
 
 @dataclass
-class AppSession:
-    display: DisplayManager
+class AppState:
     process: ProcessManager
     accessibility: AccessibilityTree | None
     input: InputController
@@ -57,17 +60,29 @@ class AppSession:
     waiter: IdleWaiter
 
 
-_session: AppSession | None = None
+@dataclass
+class DisplaySession:
+    manager: DisplayManager
+    resolved_display: str
 
 
-def _require_session() -> AppSession:
-    global _session
-    if _session is None:
+_display: DisplaySession | None = None
+_app: AppState | None = None
+
+
+def _require_display() -> DisplaySession:
+    if _display is None:
+        raise AppNotRunning("No display session. Call launch_app first.")
+    return _display
+
+
+def _require_app() -> AppState:
+    if _app is None:
         raise AppNotRunning("No app is running. Call launch_app first.")
-    return _session
+    return _app
 
 
-def _require_accessibility(s: AppSession) -> AccessibilityTree:
+def _require_accessibility(s: AppState) -> AccessibilityTree:
     if s.accessibility is None:
         raise AppNotRunning(
             "AT-SPI accessibility not available for this app. "
@@ -102,8 +117,13 @@ async def launch_app(
     timeout: float = 10.0,
     display_mode: Literal["xvfb", "local"] = "xvfb",
     display: str | None = None,
+    vnc: bool = False,
 ) -> dict:
     """Launch any application under an isolated or local X11 display.
+
+    The display session (Xvfb + D-Bus) persists across app restarts —
+    only the app process is replaced on each launch_app call.
+    Call stop_display() to tear down the display when you're done.
 
     Args:
         binary: Path to executable or name on PATH (e.g., "my_qt_app", "python3").
@@ -115,21 +135,39 @@ async def launch_app(
         timeout: Seconds to wait for the app to register with AT-SPI.
         display_mode: "xvfb" for an isolated virtual display, "local" to reuse a visible X11 display.
         display: Explicit X11 display string for local mode (e.g. ":0"). Defaults to inherited DISPLAY.
+        vnc: Start x11vnc for view-only observation of the Xvfb display (ignored in local mode).
     """
-    global _session
+    global _display, _app
 
     try:
-        # Close existing session if any
-        if _session is not None:
-            close_app()
+        # Close existing app if any (but keep the display)
+        if _app is not None:
+            _close_app_only()
 
-        dm = DisplayManager()
-        resolved_display = dm.start(
-            width=width,
-            height=height,
-            mode=display_mode,
-            display=display,
-        )
+        # Reuse existing display if compatible, otherwise create a new one
+        if _display is not None:
+            dm = _display.manager
+            if dm.display_mode != display_mode or not dm.is_running:
+                _stop_display_only()
+                _display = None
+
+        if _display is None:
+            dm = DisplayManager()
+            resolved_display = dm.start(
+                width=width,
+                height=height,
+                mode=display_mode,
+                display=display,
+            )
+            if vnc and display_mode != "local":
+                dm.start_vnc()
+            _display = DisplaySession(manager=dm, resolved_display=resolved_display)
+        else:
+            dm = _display.manager
+            resolved_display = _display.resolved_display
+            # Start VNC if requested and not already running
+            if vnc and display_mode != "local" and not dm.vnc_running:
+                dm.start_vnc()
 
         # Merge environments: os.environ + display env + user overrides
         merged_env = {**os.environ, **dm.env, **(env or {})}
@@ -138,14 +176,10 @@ async def launch_app(
         pid = pm.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
         logger.info(
             "App launched: %s (pid=%s, mode=%s, display=%s)",
-            binary,
-            pid,
-            dm.display_mode,
-            resolved_display,
+            binary, pid, dm.display_mode, resolved_display,
         )
 
         # Try to connect AT-SPI (retry until timeout)
-        # Use asyncio.sleep to avoid blocking the MCP event loop
         accessibility = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -153,16 +187,12 @@ async def launch_app(
             if pm.poll() is not None:
                 stdout, stderr = pm.get_output()
                 pm.terminate()
-                failed_display_mode = dm.display_mode
-                failed_display = resolved_display
-                failed_warnings = dm.warnings
-                dm.stop()
                 return {
                     "success": False,
                     "message": f"App exited immediately. stderr: {stderr[:500]}",
-                    "display_mode": failed_display_mode,
-                    "display": failed_display,
-                    "warnings": failed_warnings,
+                    "display_mode": dm.display_mode,
+                    "display": resolved_display,
+                    "warnings": dm.warnings,
                 }
             try:
                 accessibility = AccessibilityTree(pid=pid, display_env=dm.env)
@@ -173,13 +203,11 @@ async def launch_app(
         if accessibility is None:
             logger.warning("AT-SPI not available; running in screenshot-only mode")
 
-        _session = AppSession(
-            display=dm,
+        _app = AppState(
             process=pm,
             accessibility=accessibility,
             input=InputController(
-                resolved_display,
-                pid=pid,
+                resolved_display, pid=pid,
                 activate_on_keyboard=(dm.display_mode == "local"),
             ),
             screenshot=ScreenshotCapture(resolved_display, pid=pid),
@@ -190,7 +218,7 @@ async def launch_app(
         if accessibility is None:
             message += " (screenshot-only mode)"
 
-        return {
+        result = {
             "success": True,
             "message": message,
             "pid": pid,
@@ -198,39 +226,74 @@ async def launch_app(
             "display": resolved_display,
             "warnings": dm.warnings,
         }
+        if dm.vnc_running:
+            result["vnc_display"] = dm.vnc_display
+        return result
     except GuiUserError as e:
         return {"success": False, "message": str(e)}
+
+
+def _close_app_only() -> None:
+    """Terminate the app process without touching the display."""
+    global _app
+    if _app is not None:
+        _app.process.terminate()
+        _app = None
+
+
+def _stop_display_only() -> None:
+    """Tear down the display session."""
+    global _display
+    if _display is not None:
+        _display.manager.stop()
+        _display = None
 
 
 @mcp.tool()
 @_handle_errors
 def close_app() -> dict:
-    """Close the running application and virtual display."""
-    global _session
-    if _session is None:
+    """Close the running application (the display session stays alive for reuse)."""
+    global _app
+    if _app is None:
         return {"success": True, "message": "No app was running"}
+    _close_app_only()
+    return {"success": True, "message": "App closed (display still running)"}
 
-    _session.process.terminate()
-    _session.display.stop()
-    _session = None
-    return {"success": True, "message": "App closed"}
+
+@mcp.tool()
+@_handle_errors
+def stop_display() -> dict:
+    """Tear down the display session (Xvfb, D-Bus, VNC). Also closes any running app."""
+    _close_app_only()
+    _stop_display_only()
+    return {"success": True, "message": "Display session stopped"}
 
 
 @mcp.tool()
 @_handle_errors
 def get_app_status() -> dict:
     """Check if the application is running and get diagnostics."""
-    if _session is None:
+    if _app is None:
+        display_info = {}
+        if _display is not None:
+            display_info = {
+                "display_mode": _display.manager.display_mode,
+                "display": _display.resolved_display,
+                "display_running": _display.manager.is_running,
+                "vnc_display": _display.manager.vnc_display if _display.manager.vnc_running else None,
+            }
         return {"running": False, "pid": None, "exit_code": None,
-                "display_mode": None, "display": None, "stdout": "", "stderr": ""}
+                "stdout": "", "stderr": "", **display_info}
 
-    stdout, stderr = _session.process.get_output()
+    stdout, stderr = _app.process.get_output()
+    dm = _display.manager if _display else None
     return {
-        "running": _session.process.is_running,
-        "pid": _session.process.pid,
-        "exit_code": _session.process.poll(),
-        "display_mode": _session.display.display_mode,
-        "display": _session.display.display,
+        "running": _app.process.is_running,
+        "pid": _app.process.pid,
+        "exit_code": _app.process.poll(),
+        "display_mode": dm.display_mode if dm else None,
+        "display": _display.resolved_display if _display else None,
+        "vnc_display": dm.vnc_display if dm and dm.vnc_running else None,
         "stdout": stdout[-500:] if stdout else "",
         "stderr": stderr[-500:] if stderr else "",
     }
@@ -245,16 +308,32 @@ def get_app_status() -> dict:
 def screenshot(output_path: str | None = None) -> dict:
     """Capture a screenshot of the application.
 
+    Every screenshot is also auto-saved to .gui-user/screenshots/
+    in the current working directory with a timestamp filename.
+
     Args:
-        output_path: Optional file path to save the PNG.
+        output_path: Optional additional file path to save the PNG.
 
     Returns base64-encoded PNG image data.
     """
-    s = _require_session()
-    b64 = s.screenshot.capture_base64()
+    s = _require_app()
+    png_bytes = s.screenshot.capture()
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+
     if output_path:
-        s.screenshot.capture_to_file(output_path)
-    return {"success": True, "image_base64": b64, "path": output_path}
+        with open(output_path, "wb") as f:
+            f.write(png_bytes)
+
+    # Auto-save to per-project gallery
+    gallery_dir = os.path.join(os.getcwd(), ".gui-user", "screenshots")
+    os.makedirs(gallery_dir, exist_ok=True)
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+    gallery_path = os.path.join(gallery_dir, f"{ts}.png")
+    with open(gallery_path, "wb") as f:
+        f.write(png_bytes)
+
+    return {"success": True, "image_base64": b64, "path": output_path, "gallery_path": gallery_path}
 
 
 @mcp.tool()
@@ -271,7 +350,7 @@ def list_ui_elements(
         name: Filter by name/label substring.
         visible_only: Only return visible elements.
     """
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elements = tree.list_elements(filter_role=role, filter_name=name, visible_only=visible_only)
     return {
@@ -295,7 +374,7 @@ def find_element(
         role: Role substring to match (e.g., "button").
         index: Return the nth match (0-based).
     """
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elem = tree.find_element(text=text, role=role, index=index)
     if elem is None:
@@ -319,7 +398,7 @@ def get_element_info(
         at_x: X screen coordinate (use with at_y for coordinate lookup).
         at_y: Y screen coordinate.
     """
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
 
     if at_x is not None and at_y is not None:
@@ -346,7 +425,7 @@ def click(x: int, y: int, button: str = "left") -> dict:
         y: Y coordinate.
         button: "left", "right", or "middle".
     """
-    s = _require_session()
+    s = _require_app()
     s.input.click(x, y, button)
     return {"success": True, "message": f"Clicked at ({x}, {y})"}
 
@@ -367,7 +446,7 @@ def click_element(
         index: Which match to click (0-based).
         button: "left", "right", or "middle".
     """
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elem = tree.find_element(text=text, role=role, index=index)
     if elem is None:
@@ -380,7 +459,7 @@ def click_element(
 @_handle_errors
 def double_click(x: int, y: int, button: str = "left") -> dict:
     """Double-click at screen coordinates."""
-    s = _require_session()
+    s = _require_app()
     s.input.double_click(x, y, button)
     return {"success": True, "message": f"Double-clicked at ({x}, {y})"}
 
@@ -394,7 +473,7 @@ def double_click_element(
     button: str = "left",
 ) -> dict:
     """Find a UI element and double-click its center."""
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elem = tree.find_element(text=text, role=role, index=index)
     if elem is None:
@@ -407,7 +486,7 @@ def double_click_element(
 @_handle_errors
 def hover(x: int, y: int) -> dict:
     """Move the mouse to screen coordinates."""
-    s = _require_session()
+    s = _require_app()
     s.input.mouse_move(x, y)
     return {"success": True, "message": f"Moved mouse to ({x}, {y})"}
 
@@ -420,7 +499,7 @@ def hover_element(
     index: int = 0,
 ) -> dict:
     """Find a UI element and move the mouse to its center."""
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elem = tree.find_element(text=text, role=role, index=index)
     if elem is None:
@@ -441,7 +520,7 @@ def type_text(text: str) -> dict:
     Args:
         text: The text to type.
     """
-    s = _require_session()
+    s = _require_app()
     s.input.type_text(text)
     return {"success": True, "message": f"Typed {len(text)} characters"}
 
@@ -455,7 +534,7 @@ def press_key(key: str, modifiers: list[str] | None = None) -> dict:
         key: Key name (e.g., "Enter", "Tab", "Escape", "a", "F1").
         modifiers: Optional list of modifiers ("Ctrl", "Shift", "Alt", "Meta").
     """
-    s = _require_session()
+    s = _require_app()
     s.input.press_key(key, modifiers)
     mod_str = "+".join(modifiers) + "+" if modifiers else ""
     return {"success": True, "message": f"Pressed {mod_str}{key}"}
@@ -473,7 +552,7 @@ def wait_for_idle(timeout: float = 5.0) -> dict:
     Args:
         timeout: Maximum seconds to wait.
     """
-    s = _require_session()
+    s = _require_app()
     s.waiter.wait_for_idle(timeout=timeout)
     return {"success": True, "message": "App is idle"}
 
@@ -492,7 +571,7 @@ def wait_for_element(
         role: Role substring to match.
         timeout: Maximum seconds to wait.
     """
-    s = _require_session()
+    s = _require_app()
     tree = _require_accessibility(s)
     elem = s.waiter.wait_for_element(tree, text=text, role=role, timeout=timeout)
     return {"success": True, "element": elem.to_dict()}
