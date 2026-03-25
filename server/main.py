@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Qt GUI Testing MCP Server.
+"""gui-user: External Computer-Use MCP Server.
 
-Provides headless Qt application testing capabilities:
-- Launch Qt apps via xvfb
-- Capture screenshots
-- Simulate clicks, hovers, keyboard input
-- Find and inspect widgets by name
+Launches, observes, and interacts with arbitrary X11 applications
+via AT-SPI2 accessibility tree and xdotool input injection.
 
 IMPORTANT: This is a stdio MCP server - NEVER use print() or write to stdout!
 All logging must go to stderr or a file.
 """
 
-import asyncio
-import base64
-import json
+import functools
 import logging
 import os
-import signal
-import socket
-import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
+from dataclasses import dataclass
 
 from mcp.server.fastmcp import FastMCP
+
+from .accessibility import AccessibilityTree
+from .deps import check_dependencies
+from .display import DisplayManager
+from .errors import AppNotRunning, GuiUserError
+from .input import InputController
+from .process import ProcessManager
+from .screenshot import ScreenshotCapture
+from .wait import IdleWaiter
 
 # Configure logging to stderr (NEVER stdout for stdio MCP servers)
 logging.basicConfig(
@@ -32,637 +32,441 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     stream=sys.stderr,
 )
-logger = logging.getLogger("qt-pilot")
+logger = logging.getLogger("gui-user")
+
+# Validate system dependencies at import time
+check_dependencies()
 
 # Create MCP server
-mcp = FastMCP("qt-pilot")
-
-# Global state for tracking launched apps
-_app_state = {
-    "process": None,
-    "socket_path": None,
-    "display": None,
-    "xvfb_process": None,
-}
-
-# Path to the test harness script (same directory as this file)
-HARNESS_PATH = Path(__file__).parent / "harness.py"
+mcp = FastMCP("gui-user")
 
 
-def _cleanup_app():
-    """Clean up any running app and xvfb."""
-    if _app_state["process"]:
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AppSession:
+    display: DisplayManager
+    process: ProcessManager
+    accessibility: AccessibilityTree | None
+    input: InputController
+    screenshot: ScreenshotCapture
+    waiter: IdleWaiter
+
+
+_session: AppSession | None = None
+
+
+def _require_session() -> AppSession:
+    global _session
+    if _session is None:
+        raise AppNotRunning("No app is running. Call launch_app first.")
+    return _session
+
+
+def _require_accessibility(s: AppSession) -> AccessibilityTree:
+    if s.accessibility is None:
+        raise AppNotRunning(
+            "AT-SPI accessibility not available for this app. "
+            "Use screenshot() + coordinates instead."
+        )
+    return s.accessibility
+
+
+def _handle_errors(func):
+    """Decorator: catch GuiUserError subclasses → {success: False, message: ...}."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
         try:
-            _app_state["process"].terminate()
-            _app_state["process"].wait(timeout=5)
-        except Exception as e:
-            logger.warning(f"Error terminating app: {e}")
-        _app_state["process"] = None
-
-    if _app_state["xvfb_process"]:
-        try:
-            _app_state["xvfb_process"].terminate()
-            _app_state["xvfb_process"].wait(timeout=5)
-        except Exception as e:
-            logger.warning(f"Error terminating xvfb: {e}")
-        _app_state["xvfb_process"] = None
-
-    if _app_state["socket_path"] and os.path.exists(_app_state["socket_path"]):
-        try:
-            os.unlink(_app_state["socket_path"])
-        except Exception:
-            pass
-        _app_state["socket_path"] = None
+            return func(*args, **kwargs)
+        except GuiUserError as e:
+            return {"success": False, "message": str(e)}
+    return wrapper
 
 
-def _get_process_output() -> dict:
-    """Get any available output from the app process."""
-    if not _app_state["process"]:
-        return {"stdout": "", "stderr": "", "running": False, "exit_code": None}
-
-    # Check if process is still running
-    exit_code = _app_state["process"].poll()
-    running = exit_code is None
-
-    stdout = ""
-    stderr = ""
-
-    if not running:
-        # Process has exited, get all output
-        try:
-            out, err = _app_state["process"].communicate(timeout=1)
-            stdout = out.decode() if out else ""
-            stderr = err.decode() if err else ""
-        except Exception:
-            pass
-
-    return {
-        "stdout": stdout,
-        "stderr": stderr,
-        "running": running,
-        "exit_code": exit_code,
-    }
-
-
-def _send_command(command: dict, timeout: float = 10.0) -> dict:
-    """Send a command to the test harness via Unix socket."""
-    if not _app_state["socket_path"]:
-        return {"success": False, "error": "No app is running"}
-
-    # Check if process is still alive before attempting communication
-    proc_info = _get_process_output()
-    if not proc_info["running"]:
-        error_msg = f"App has exited (code: {proc_info['exit_code']})"
-        if proc_info["stderr"]:
-            error_msg += f"\nstderr: {proc_info['stderr'][:500]}"
-        return {"success": False, "error": error_msg}
-
-    try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect(_app_state["socket_path"])
-
-        # Send command as JSON
-        data = json.dumps(command).encode() + b"\n"
-        sock.sendall(data)
-
-        # Read response
-        response_data = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            response_data += chunk
-            if b"\n" in response_data:
-                break
-
-        sock.close()
-        return json.loads(response_data.decode().strip())
-    except socket.timeout:
-        return {"success": False, "error": "Command timed out"}
-    except ConnectionRefusedError:
-        # Check if app crashed
-        proc_info = _get_process_output()
-        if not proc_info["running"]:
-            error_msg = f"App crashed (exit code: {proc_info['exit_code']})"
-            if proc_info["stderr"]:
-                error_msg += f"\nstderr: {proc_info['stderr'][:500]}"
-            return {"success": False, "error": error_msg}
-        return {"success": False, "error": "App not responding (connection refused)"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
+# ---------------------------------------------------------------------------
+# App Lifecycle
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_handle_errors
 def launch_app(
-    script_path: str = None,
-    module: str = None,
-    working_dir: str = None,
-    python_paths: list[str] = None,
-    timeout: int = 10,
+    binary: str,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    working_dir: str | None = None,
+    width: int = 1280,
+    height: int = 1024,
+    timeout: float = 10.0,
 ) -> dict:
-    """Launch a Qt application headlessly via xvfb.
-
-    Supports two modes:
-    1. Script mode: Run a Python script directly
-       launch_app(script_path="/path/to/test_gui.py")
-
-    2. Module mode: Run as Python module (like `python -m`)
-       launch_app(module="src.gui.main", working_dir="/path/to/project")
+    """Launch any application under a virtual X11 display.
 
     Args:
-        script_path: Path to Python script (mode 1)
-        module: Python module path to run with -m (mode 2)
-        working_dir: Working directory (required for module mode)
-        python_paths: Additional paths to add to Python's sys.path (for finding modules)
-        timeout: Seconds to wait for app window to appear
-
-    Returns:
-        {"success": bool, "message": str, "socket_path": str}
+        binary: Path to executable or name on PATH (e.g., "my_qt_app", "python3").
+        args: Command-line arguments for the binary.
+        env: Extra environment variables (merged with display env).
+        working_dir: Working directory for the process.
+        width: Virtual display width in pixels.
+        height: Virtual display height in pixels.
+        timeout: Seconds to wait for the app to register with AT-SPI.
     """
-    # Validate inputs
-    if not script_path and not module:
-        return {"success": False, "message": "Must provide either script_path or module"}
+    global _session
 
-    if module and not working_dir:
-        return {"success": False, "message": "working_dir is required for module mode"}
+    # Close existing session if any
+    if _session is not None:
+        close_app()
 
-    if script_path and not os.path.exists(script_path):
-        return {"success": False, "message": f"Script not found: {script_path}"}
+    dm = DisplayManager()
+    display = dm.start(width=width, height=height)
 
-    # Clean up any existing app
-    _cleanup_app()
+    # Merge environments: os.environ + display env + user overrides
+    merged_env = {**os.environ, **dm.env, **(env or {})}
 
-    # Create socket path for communication
-    socket_path = tempfile.mktemp(suffix=".sock", prefix="qt_gui_tester_")
-    _app_state["socket_path"] = socket_path
+    pm = ProcessManager()
+    pid = pm.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
+    logger.info(f"App launched: {binary} (pid={pid}, display={display})")
 
-    # Find available display number
-    display_num = 99
-    while os.path.exists(f"/tmp/.X{display_num}-lock"):
-        display_num += 1
-    display = f":{display_num}"
-    _app_state["display"] = display
-
-    try:
-        # Start Xvfb
-        xvfb_cmd = ["Xvfb", display, "-screen", "0", "1280x1024x24"]
-        _app_state["xvfb_process"] = subprocess.Popen(
-            xvfb_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(0.5)  # Wait for Xvfb to start
-
-        # Build harness command
-        env = os.environ.copy()
-        env["DISPLAY"] = display
-        env["QT_QPA_PLATFORM"] = "xcb"  # Use X11 backend
-
-        harness_cmd = [sys.executable, str(HARNESS_PATH), "--socket", socket_path]
-
-        if script_path:
-            harness_cmd.extend(["--script", script_path])
-        elif module:
-            harness_cmd.extend(["--module", module])
-
-        # Determine working directory
-        cwd = working_dir or (os.path.dirname(script_path) if script_path else None)
-
-        # Pass working directory to harness for sys.path setup
-        if cwd:
-            harness_cmd.extend(["--working-dir", cwd])
-
-        # Add additional Python paths for module discovery
-        if python_paths:
-            for path in python_paths:
-                harness_cmd.extend(["--python-path", path])
-
-        logger.info(f"Launching harness: {' '.join(harness_cmd)}")
-        logger.info(f"Working dir: {cwd}")
-        logger.info(f"Display: {display}")
-        if python_paths:
-            logger.info(f"Python paths: {python_paths}")
-
-        # Start the harness
-        _app_state["process"] = subprocess.Popen(
-            harness_cmd,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        # Wait for socket to be ready
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if os.path.exists(socket_path):
-                # Try to connect
-                result = _send_command({"cmd": "ping"}, timeout=2)
-                if result.get("success"):
-                    return {
-                        "success": True,
-                        "message": "App launched successfully",
-                        "socket_path": socket_path,
-                        "display": display,
-                    }
-            time.sleep(0.5)
-
-        # Check if process died
-        if _app_state["process"].poll() is not None:
-            stdout, stderr = _app_state["process"].communicate()
+    # Try to connect AT-SPI (retry until timeout)
+    accessibility = None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        if pm.poll() is not None:
+            stdout, stderr = pm.get_output()
+            pm.terminate()
+            dm.stop()
             return {
                 "success": False,
-                "message": f"App exited unexpectedly. stderr: {stderr.decode()[:500]}",
+                "message": f"App exited immediately. stderr: {stderr[:500]}",
             }
+        try:
+            accessibility = AccessibilityTree(pid=pid, display_env=dm.env)
+            break
+        except Exception as e:
+            logger.debug(f"AT-SPI not ready yet: {e}")
+
+    if accessibility is None:
+        logger.warning("AT-SPI not available; running in screenshot-only mode")
+
+    _session = AppSession(
+        display=dm,
+        process=pm,
+        accessibility=accessibility,
+        input=InputController(display),
+        screenshot=ScreenshotCapture(display),
+        waiter=IdleWaiter(pid),
+    )
 
-        return {"success": False, "message": f"Timeout waiting for app (socket: {socket_path})"}
-
-    except Exception as e:
-        _cleanup_app()
-        return {"success": False, "message": f"Failed to launch: {str(e)}"}
-
-
-@mcp.tool()
-def capture_screenshot(output_path: str = None) -> dict:
-    """Capture screenshot of current application.
-
-    Args:
-        output_path: Optional path to save PNG file
-
-    Returns:
-        {"success": bool, "path": str, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    # Generate output path if not provided
-    if not output_path:
-        output_path = tempfile.mktemp(suffix=".png", prefix="screenshot_")
-
-    result = _send_command({
-        "cmd": "screenshot",
-        "path": output_path,
-    })
-
-    if result.get("success"):
-        return {
-            "success": True,
-            "path": output_path,
-            "message": f"Screenshot saved to {output_path}",
-        }
-    else:
-        return {
-            "success": False,
-            "message": result.get("error", "Screenshot failed"),
-        }
-
-
-@mcp.tool()
-def click_widget(widget_name: str, button: str = "left") -> dict:
-    """Click a widget by its object name.
-
-    Args:
-        widget_name: The objectName of the target widget
-        button: "left", "right", or "middle"
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "click",
-        "widget_name": widget_name,
-        "button": button,
-    })
-
-    if result.get("success"):
-        return {"success": True, "message": f"Clicked widget '{widget_name}'"}
-    else:
-        return {"success": False, "message": result.get("error", "Click failed")}
-
-
-@mcp.tool()
-def hover_widget(widget_name: str) -> dict:
-    """Hover over a widget by its object name.
-
-    Args:
-        widget_name: The objectName of the target widget
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "hover",
-        "widget_name": widget_name,
-    })
-
-    if result.get("success"):
-        return {"success": True, "message": f"Hovering over widget '{widget_name}'"}
-    else:
-        return {"success": False, "message": result.get("error", "Hover failed")}
-
-
-@mcp.tool()
-def type_text(text: str, widget_name: str = None) -> dict:
-    """Type text into a widget or the currently focused widget.
-
-    Args:
-        text: Text to type
-        widget_name: Optional target widget (uses focused widget if None)
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "type_text",
-        "text": text,
-        "widget_name": widget_name,
-    })
-
-    if result.get("success"):
-        target = f"widget '{widget_name}'" if widget_name else "focused widget"
-        return {"success": True, "message": f"Typed text into {target}"}
-    else:
-        return {"success": False, "message": result.get("error", "Type failed")}
-
-
-@mcp.tool()
-def press_key(key: str, modifiers: list[str] = None) -> dict:
-    """Simulate a key press.
-
-    Args:
-        key: Key name (e.g., "Enter", "Tab", "Escape", "A", "F1")
-        modifiers: Optional list of modifiers ("Ctrl", "Shift", "Alt")
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "press_key",
-        "key": key,
-        "modifiers": modifiers or [],
-    })
-
-    if result.get("success"):
-        mod_str = "+".join(modifiers) + "+" if modifiers else ""
-        return {"success": True, "message": f"Pressed {mod_str}{key}"}
-    else:
-        return {"success": False, "message": result.get("error", "Key press failed")}
-
-
-@mcp.tool()
-def find_widgets(name_pattern: str = "*") -> dict:
-    """List widgets matching a name pattern.
-
-    Args:
-        name_pattern: Glob pattern for widget names (* = all named widgets)
-
-    Returns:
-        {"success": bool, "widgets": list[dict]}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "find_widgets",
-        "pattern": name_pattern,
-    })
-
-    if result.get("success"):
-        return {
-            "success": True,
-            "widgets": result.get("widgets", []),
-            "count": len(result.get("widgets", [])),
-        }
-    else:
-        return {"success": False, "message": result.get("error", "Find failed")}
-
-
-@mcp.tool()
-def click_at(x: int, y: int, button: str = "left") -> dict:
-    """Click at specific screen coordinates.
-
-    Useful for clicking widgets that don't have object names.
-
-    Args:
-        x: X coordinate (global screen position)
-        y: Y coordinate (global screen position)
-        button: "left", "right", or "middle"
-
-    Returns:
-        {"success": bool, "message": str, "widget_type": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "click_at",
-        "x": x,
-        "y": y,
-        "button": button,
-    })
-
-    if result.get("success"):
-        widget_type = result.get("widget_type", "unknown")
-        return {"success": True, "message": f"Clicked at ({x}, {y}) on {widget_type}"}
-    else:
-        return {"success": False, "message": result.get("error", "Click failed")}
-
-
-@mcp.tool()
-def list_all_widgets(include_invisible: bool = False) -> dict:
-    """List all widgets with their coordinates (including unnamed ones).
-
-    Useful for understanding the complete widget hierarchy and finding
-    click targets by position.
-
-    Args:
-        include_invisible: Whether to include invisible widgets
-
-    Returns:
-        {"success": bool, "widgets": list[dict], "count": int}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "list_all_widgets",
-        "include_invisible": include_invisible,
-    })
-
-    if result.get("success"):
-        return {
-            "success": True,
-            "widgets": result.get("widgets", []),
-            "count": result.get("count", 0),
-        }
-    else:
-        return {"success": False, "message": result.get("error", "List failed")}
-
-
-@mcp.tool()
-def trigger_action(action_name: str) -> dict:
-    """Trigger a QAction by its object name.
-
-    This directly triggers menu actions without needing to click through menus.
-    Useful for menu items and toolbar actions.
-
-    Args:
-        action_name: The objectName of the QAction to trigger
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "trigger_action",
-        "action_name": action_name,
-    })
-
-    if result.get("success"):
-        return {"success": True, "message": f"Triggered action '{action_name}'"}
-    else:
-        return {"success": False, "message": result.get("error", "Trigger failed")}
-
-
-@mcp.tool()
-def list_actions() -> dict:
-    """List all QActions in the application.
-
-    Returns menu items, toolbar actions, etc. with their names, text,
-    shortcuts, and enabled/checked state.
-
-    Returns:
-        {"success": bool, "actions": list[dict], "count": int}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "list_actions",
-    })
-
-    if result.get("success"):
-        return {
-            "success": True,
-            "actions": result.get("actions", []),
-            "count": result.get("count", 0),
-        }
-    else:
-        return {"success": False, "message": result.get("error", "List failed")}
-
-
-@mcp.tool()
-def get_widget_info(widget_name: str) -> dict:
-    """Get detailed information about a specific widget.
-
-    Args:
-        widget_name: The objectName of the target widget
-
-    Returns:
-        {"success": bool, "info": dict} with size, position, visible, enabled, etc.
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "get_widget_info",
-        "widget_name": widget_name,
-    })
-
-    if result.get("success"):
-        return {"success": True, "info": result.get("info", {})}
-    else:
-        return {"success": False, "message": result.get("error", "Get info failed")}
-
-
-@mcp.tool()
-def get_app_status() -> dict:
-    """Check if the application is still running and get diagnostics.
-
-    Use this to check app health without attempting a command.
-
-    Returns:
-        {"running": bool, "exit_code": int|None, "stderr": str, "display": str}
-    """
-    if not _app_state["process"]:
-        return {
-            "running": False,
-            "exit_code": None,
-            "stderr": "",
-            "message": "No app has been launched",
-        }
-
-    proc_info = _get_process_output()
     return {
-        "running": proc_info["running"],
-        "exit_code": proc_info["exit_code"],
-        "stderr": proc_info["stderr"][:1000] if proc_info["stderr"] else "",
-        "display": _app_state.get("display", ""),
-        "socket_path": _app_state.get("socket_path", ""),
+        "success": True,
+        "message": "App launched" + (" (screenshot-only mode)" if accessibility is None else ""),
+        "pid": pid,
+        "display": display,
     }
 
 
 @mcp.tool()
-def wait_for_idle(timeout: float = 5.0) -> dict:
-    """Wait for the Qt application to process pending events.
-
-    Useful after clicks or other actions to let the UI settle.
-
-    Args:
-        timeout: Maximum seconds to wait
-
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    result = _send_command({
-        "cmd": "wait_idle",
-        "timeout": timeout,
-    }, timeout=timeout + 2)
-
-    if result.get("success"):
-        return {"success": True, "message": "App is idle"}
-    else:
-        return {"success": False, "message": result.get("error", "Wait failed")}
-
-
-@mcp.tool()
+@_handle_errors
 def close_app() -> dict:
-    """Close the currently running application.
+    """Close the running application and virtual display."""
+    global _session
+    if _session is None:
+        return {"success": True, "message": "No app was running"}
 
-    Returns:
-        {"success": bool, "message": str}
-    """
-    if not _app_state["process"]:
-        return {"success": False, "message": "No app is running"}
-
-    # Try graceful shutdown first
-    _send_command({"cmd": "quit"}, timeout=2)
-
-    _cleanup_app()
+    _session.process.terminate()
+    _session.display.stop()
+    _session = None
     return {"success": True, "message": "App closed"}
 
 
+@mcp.tool()
+@_handle_errors
+def get_app_status() -> dict:
+    """Check if the application is running and get diagnostics."""
+    if _session is None:
+        return {"running": False, "pid": None, "exit_code": None,
+                "display": None, "stdout": "", "stderr": ""}
+
+    stdout, stderr = _session.process.get_output()
+    return {
+        "running": _session.process.is_running,
+        "pid": _session.process.pid,
+        "exit_code": _session.process.poll(),
+        "display": _session.display.display,
+        "stdout": stdout[-500:] if stdout else "",
+        "stderr": stderr[-500:] if stderr else "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Observation
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def screenshot(output_path: str | None = None) -> dict:
+    """Capture a screenshot of the application.
+
+    Args:
+        output_path: Optional file path to save the PNG.
+
+    Returns base64-encoded PNG image data.
+    """
+    s = _require_session()
+    b64 = s.screenshot.capture_base64()
+    if output_path:
+        s.screenshot.capture_to_file(output_path)
+    return {"success": True, "image_base64": b64, "path": output_path}
+
+
+@mcp.tool()
+@_handle_errors
+def list_ui_elements(
+    role: str | None = None,
+    name: str | None = None,
+    visible_only: bool = True,
+) -> dict:
+    """List UI elements from the accessibility tree.
+
+    Args:
+        role: Filter by role substring (e.g., "button", "text", "label").
+        name: Filter by name/label substring.
+        visible_only: Only return visible elements.
+    """
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elements = tree.list_elements(filter_role=role, filter_name=name, visible_only=visible_only)
+    return {
+        "success": True,
+        "elements": [e.to_dict() for e in elements],
+        "count": len(elements),
+    }
+
+
+@mcp.tool()
+@_handle_errors
+def find_element(
+    text: str | None = None,
+    role: str | None = None,
+    index: int = 0,
+) -> dict:
+    """Find a UI element by text content and/or role.
+
+    Args:
+        text: Text to search for in element name or text content.
+        role: Role substring to match (e.g., "button").
+        index: Return the nth match (0-based).
+    """
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elem = tree.find_element(text=text, role=role, index=index)
+    if elem is None:
+        return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+    return {"success": True, "element": elem.to_dict()}
+
+
+@mcp.tool()
+@_handle_errors
+def get_element_info(
+    text: str | None = None,
+    role: str | None = None,
+    at_x: int | None = None,
+    at_y: int | None = None,
+) -> dict:
+    """Get detailed info about an element by text/role or coordinates.
+
+    Args:
+        text: Text to search for in element name or content.
+        role: Role substring to match.
+        at_x: X screen coordinate (use with at_y for coordinate lookup).
+        at_y: Y screen coordinate.
+    """
+    s = _require_session()
+    tree = _require_accessibility(s)
+
+    if at_x is not None and at_y is not None:
+        elem = tree.get_element_at(at_x, at_y)
+    else:
+        elem = tree.find_element(text=text, role=role)
+
+    if elem is None:
+        return {"success": False, "message": "Element not found"}
+    return {"success": True, "element": elem.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# Interaction — Mouse
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def click(x: int, y: int, button: str = "left") -> dict:
+    """Click at screen coordinates.
+
+    Args:
+        x: X coordinate.
+        y: Y coordinate.
+        button: "left", "right", or "middle".
+    """
+    s = _require_session()
+    s.input.click(x, y, button)
+    return {"success": True, "message": f"Clicked at ({x}, {y})"}
+
+
+@mcp.tool()
+@_handle_errors
+def click_element(
+    text: str | None = None,
+    role: str | None = None,
+    index: int = 0,
+    button: str = "left",
+) -> dict:
+    """Find a UI element and click its center.
+
+    Args:
+        text: Text to search for.
+        role: Role substring (e.g., "button").
+        index: Which match to click (0-based).
+        button: "left", "right", or "middle".
+    """
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elem = tree.find_element(text=text, role=role, index=index)
+    if elem is None:
+        return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+    s.input.click(*elem.center, button)
+    return {"success": True, "message": f"Clicked [{elem.role}] {elem.name!r} at {elem.center}"}
+
+
+@mcp.tool()
+@_handle_errors
+def double_click(x: int, y: int, button: str = "left") -> dict:
+    """Double-click at screen coordinates."""
+    s = _require_session()
+    s.input.double_click(x, y, button)
+    return {"success": True, "message": f"Double-clicked at ({x}, {y})"}
+
+
+@mcp.tool()
+@_handle_errors
+def double_click_element(
+    text: str | None = None,
+    role: str | None = None,
+    index: int = 0,
+    button: str = "left",
+) -> dict:
+    """Find a UI element and double-click its center."""
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elem = tree.find_element(text=text, role=role, index=index)
+    if elem is None:
+        return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+    s.input.double_click(*elem.center, button)
+    return {"success": True, "message": f"Double-clicked [{elem.role}] {elem.name!r}"}
+
+
+@mcp.tool()
+@_handle_errors
+def hover(x: int, y: int) -> dict:
+    """Move the mouse to screen coordinates."""
+    s = _require_session()
+    s.input.mouse_move(x, y)
+    return {"success": True, "message": f"Moved mouse to ({x}, {y})"}
+
+
+@mcp.tool()
+@_handle_errors
+def hover_element(
+    text: str | None = None,
+    role: str | None = None,
+    index: int = 0,
+) -> dict:
+    """Find a UI element and move the mouse to its center."""
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elem = tree.find_element(text=text, role=role, index=index)
+    if elem is None:
+        return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+    s.input.mouse_move(*elem.center)
+    return {"success": True, "message": f"Hovered [{elem.role}] {elem.name!r}"}
+
+
+# ---------------------------------------------------------------------------
+# Interaction — Keyboard
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def type_text(text: str) -> dict:
+    """Type text into the currently focused widget.
+
+    Args:
+        text: The text to type.
+    """
+    s = _require_session()
+    s.input.type_text(text)
+    return {"success": True, "message": f"Typed {len(text)} characters"}
+
+
+@mcp.tool()
+@_handle_errors
+def press_key(key: str, modifiers: list[str] | None = None) -> dict:
+    """Press a key, optionally with modifiers.
+
+    Args:
+        key: Key name (e.g., "Enter", "Tab", "Escape", "a", "F1").
+        modifiers: Optional list of modifiers ("Ctrl", "Shift", "Alt", "Meta").
+    """
+    s = _require_session()
+    s.input.press_key(key, modifiers)
+    mod_str = "+".join(modifiers) + "+" if modifiers else ""
+    return {"success": True, "message": f"Pressed {mod_str}{key}"}
+
+
+# ---------------------------------------------------------------------------
+# Wait
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def wait_for_idle(timeout: float = 5.0) -> dict:
+    """Wait for the application's CPU usage to settle.
+
+    Args:
+        timeout: Maximum seconds to wait.
+    """
+    s = _require_session()
+    s.waiter.wait_for_idle(timeout=timeout)
+    return {"success": True, "message": "App is idle"}
+
+
+@mcp.tool()
+@_handle_errors
+def wait_for_element(
+    text: str | None = None,
+    role: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Poll until a UI element appears in the accessibility tree.
+
+    Args:
+        text: Text to search for.
+        role: Role substring to match.
+        timeout: Maximum seconds to wait.
+    """
+    s = _require_session()
+    tree = _require_accessibility(s)
+    elem = s.waiter.wait_for_element(tree, text=text, role=role, timeout=timeout)
+    return {"success": True, "element": elem.to_dict()}
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
-    """Run the MCP server."""
-    logger.info("Starting Qt GUI Testing MCP Server")
+    logger.info("Starting gui-user MCP Server")
     mcp.run(transport="stdio")
 
 

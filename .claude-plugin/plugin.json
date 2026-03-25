@@ -1,12 +1,12 @@
 {
-  "name": "qt-pilot",
-  "version": "1.0.0",
-  "description": "MCP server for headless Qt/PySide6 GUI testing. Enables launching Qt apps via Xvfb, capturing screenshots, simulating mouse clicks and keyboard input, and discovering widgets by object name.",
+  "name": "gui-user",
+  "version": "2.0.0",
+  "description": "MCP server for external computer-use: launch, observe, and interact with any X11 application via AT-SPI2 accessibility tree and xdotool input injection.",
   "author": {
     "name": "neatobandit0",
     "url": "https://github.com/neatobandit0"
   },
   "repository": "https://github.com/neatobandit0/qt-pilot",
   "license": "MIT",
-  "keywords": ["qt", "pyside6", "gui-testing", "mcp", "headless", "xvfb", "claude", "automation"]
+  "keywords": ["gui", "x11", "atspi", "accessibility", "computer-use", "mcp", "xdotool", "automation"]
 }
