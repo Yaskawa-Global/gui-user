@@ -174,26 +174,28 @@ launch_app(binary="my_app", vnc=True)
 # Response includes: "vnc_display": "localhost:5900"
 ```
 
-To connect, run the helper script from a terminal:
+To connect, run from any terminal:
 
 ```bash
-./view-display.sh
+gui-user-view
 ```
 
-The script auto-detects the running x11vnc and opens a VNC viewer. If x11vnc isn't running yet, it starts one on the first Xvfb display it finds.
+This auto-detects the running x11vnc and opens a VNC viewer. If x11vnc isn't running yet, it starts one on the first Xvfb display it finds. You can also pass a specific port: `gui-user-view 5902`
 
-You can also connect manually: `vncviewer localhost:<port>`
+To connect manually: `vncviewer localhost:<port>`
 
 **Requirements**: `sudo apt install x11vnc tigervnc-viewer`
 
-### Helper Scripts
+### Helper Commands
 
-| Script | Description |
+These are installed on your `$PATH` by `pip install`:
+
+| Command | Description |
 |---|---|
-| `view-display.sh` | Auto-detect the running Xvfb display and open a VNC viewer. Starts x11vnc if needed. |
-| `stop-display.sh` | Kill any lingering Xvfb, x11vnc, and at-spi2-registryd processes. Useful for cleanup after crashes or interrupted sessions. |
+| `gui-user-view` | Auto-detect the running Xvfb display and open a VNC viewer. Starts x11vnc if needed. |
+| `gui-user-stop` | Kill any lingering Xvfb, x11vnc, and at-spi2-registryd processes. Useful for cleanup after crashes or interrupted sessions. |
 
-These scripts are in the repo root. Run them from the gui-user directory or add it to your `$PATH`.
+The underlying shell scripts (`view-display.sh`, `stop-display.sh`) are also available in the repo root.
 
 ### Display Lifecycle
 

@@ -17,3 +17,5 @@ dependencies = [
 
 [project.scripts]
 gui-user-mcp = "server.main:main"
+gui-user-view = "server.script_runner:view_display"
+gui-user-stop = "server.script_runner:stop_display"
