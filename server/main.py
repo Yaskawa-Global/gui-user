@@ -8,6 +8,7 @@ IMPORTANT: This is a stdio MCP server - NEVER use print() or write to stdout!
 All logging must go to stderr or a file.
 """
 
+import asyncio
 import functools
 import logging
 import os
@@ -90,8 +91,7 @@ def _handle_errors(func):
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-@_handle_errors
-def launch_app(
+async def launch_app(
     binary: str,
     args: list[str] | None = None,
     env: dict[str, str] | None = None,
@@ -113,57 +113,61 @@ def launch_app(
     """
     global _session
 
-    # Close existing session if any
-    if _session is not None:
-        close_app()
+    try:
+        # Close existing session if any
+        if _session is not None:
+            close_app()
 
-    dm = DisplayManager()
-    display = dm.start(width=width, height=height)
+        dm = DisplayManager()
+        display = dm.start(width=width, height=height)
 
-    # Merge environments: os.environ + display env + user overrides
-    merged_env = {**os.environ, **dm.env, **(env or {})}
+        # Merge environments: os.environ + display env + user overrides
+        merged_env = {**os.environ, **dm.env, **(env or {})}
 
-    pm = ProcessManager()
-    pid = pm.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
-    logger.info(f"App launched: {binary} (pid={pid}, display={display})")
+        pm = ProcessManager()
+        pid = pm.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
+        logger.info(f"App launched: {binary} (pid={pid}, display={display})")
 
-    # Try to connect AT-SPI (retry until timeout)
-    accessibility = None
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        time.sleep(1.0)
-        if pm.poll() is not None:
-            stdout, stderr = pm.get_output()
-            pm.terminate()
-            dm.stop()
-            return {
-                "success": False,
-                "message": f"App exited immediately. stderr: {stderr[:500]}",
-            }
-        try:
-            accessibility = AccessibilityTree(pid=pid, display_env=dm.env)
-            break
-        except Exception as e:
-            logger.debug(f"AT-SPI not ready yet: {e}")
+        # Try to connect AT-SPI (retry until timeout)
+        # Use asyncio.sleep to avoid blocking the MCP event loop
+        accessibility = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            if pm.poll() is not None:
+                stdout, stderr = pm.get_output()
+                pm.terminate()
+                dm.stop()
+                return {
+                    "success": False,
+                    "message": f"App exited immediately. stderr: {stderr[:500]}",
+                }
+            try:
+                accessibility = AccessibilityTree(pid=pid, display_env=dm.env)
+                break
+            except Exception as e:
+                logger.debug(f"AT-SPI not ready yet: {e}")
 
-    if accessibility is None:
-        logger.warning("AT-SPI not available; running in screenshot-only mode")
+        if accessibility is None:
+            logger.warning("AT-SPI not available; running in screenshot-only mode")
 
-    _session = AppSession(
-        display=dm,
-        process=pm,
-        accessibility=accessibility,
-        input=InputController(display),
-        screenshot=ScreenshotCapture(display),
-        waiter=IdleWaiter(pid),
-    )
+        _session = AppSession(
+            display=dm,
+            process=pm,
+            accessibility=accessibility,
+            input=InputController(display),
+            screenshot=ScreenshotCapture(display),
+            waiter=IdleWaiter(pid),
+        )
 
-    return {
-        "success": True,
-        "message": "App launched" + (" (screenshot-only mode)" if accessibility is None else ""),
-        "pid": pid,
-        "display": display,
-    }
+        return {
+            "success": True,
+            "message": "App launched" + (" (screenshot-only mode)" if accessibility is None else ""),
+            "pid": pid,
+            "display": display,
+        }
+    except GuiUserError as e:
+        return {"success": False, "message": str(e)}
 
 
 @mcp.tool()
