@@ -6,9 +6,9 @@ An MCP server for external computer-use. Launch, observe, and interact with any 
 
 Unlike in-process testing frameworks, gui-user works externally — it can drive compiled C++ Qt/QML apps, GTK apps, Electron apps, or anything that renders on X11.
 
-## Prerequisites
+## Installation
 
-### System packages
+### 1. System packages
 
 ```bash
 # Debian/Ubuntu — required
@@ -18,23 +18,45 @@ sudo apt install xvfb xdotool at-spi2-core dbus imagemagick libgirepository1.0-d
 sudo apt install x11vnc tigervnc-viewer
 ```
 
-### Python packages
+### 2. Install gui-user
+
+Clone the repo and install in development mode:
 
 ```bash
-pip install -r requirements.txt
+git clone <repo-url> gui-user
+cd gui-user
+pip install -e .
 ```
 
-## MCP Configuration
+This puts `gui-user-mcp` on your `$PATH` as the MCP server entry point.
 
-Add to your `.mcp.json` or Claude Code settings:
+### 3. Configure Claude Code
+
+Add to your **global** Claude Code settings (`~/.claude/settings.json`) so gui-user is available in all projects:
 
 ```json
 {
-  "gui-user": {
-    "command": "python3",
-    "args": ["/path/to/gui-user/server/main.py"]
+  "mcpServers": {
+    "gui-user": {
+      "command": "gui-user-mcp"
+    }
   }
 }
+```
+
+Or for a **single project only**, create `.mcp.json` in the project root:
+
+```json
+{
+  "mcpServers": {
+    "gui-user": {
+      "command": "gui-user-mcp"
+    }
+  }
+}
+```
+
+Restart VS Code (or reload the window) after adding the configuration.
 ```
 
 ## Tools
@@ -59,6 +81,7 @@ Add to your `.mcp.json` or Claude Code settings:
 | `press_key(key, modifiers?)` | Key press (e.g., `press_key("s", ["Ctrl"])`) |
 | `wait_for_idle(timeout?)` | Wait for CPU usage to settle |
 | `wait_for_element(text?, role?, timeout?)` | Poll until element appears |
+| `batch_actions(actions)` | Execute a sequence of actions in one call (avoids per-action round-trips) |
 
 ## Example Workflow
 
@@ -157,6 +180,15 @@ The script auto-detects the running x11vnc and opens a VNC viewer. If x11vnc isn
 You can also connect manually: `vncviewer localhost:<port>`
 
 **Requirements**: `sudo apt install x11vnc tigervnc-viewer`
+
+### Helper Scripts
+
+| Script | Description |
+|---|---|
+| `view-display.sh` | Auto-detect the running Xvfb display and open a VNC viewer. Starts x11vnc if needed. |
+| `stop-display.sh` | Kill any lingering Xvfb, x11vnc, and at-spi2-registryd processes. Useful for cleanup after crashes or interrupted sessions. |
+
+These scripts are in the repo root. Run them from the gui-user directory or add it to your `$PATH`.
 
 ### Display Lifecycle
 
