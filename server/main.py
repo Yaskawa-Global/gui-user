@@ -9,7 +9,6 @@ All logging must go to stderr or a file.
 """
 
 import asyncio
-import base64
 import functools
 import logging
 import os
@@ -305,20 +304,31 @@ def get_app_status() -> dict:
 
 @mcp.tool()
 @_handle_errors
-def screenshot(output_path: str | None = None) -> dict:
+def screenshot(
+    output_path: str | None = None,
+    region_x: int | None = None,
+    region_y: int | None = None,
+    region_width: int | None = None,
+    region_height: int | None = None,
+) -> dict:
     """Capture a screenshot of the application.
 
-    Every screenshot is also auto-saved to .gui-user/screenshots/
+    Every screenshot is auto-saved to .gui-user/screenshots/
     in the current working directory with a timestamp filename.
+    Returns the file path (use Read tool to view the image).
 
     Args:
         output_path: Optional additional file path to save the PNG.
-
-    Returns base64-encoded PNG image data.
+        region_x: X coordinate of crop region (use all four region_* params together).
+        region_y: Y coordinate of crop region.
+        region_width: Width of crop region.
+        region_height: Height of crop region.
     """
     s = _require_app()
-    png_bytes = s.screenshot.capture()
-    b64 = base64.b64encode(png_bytes).decode("ascii")
+    region = None
+    if all(v is not None for v in (region_x, region_y, region_width, region_height)):
+        region = (region_x, region_y, region_width, region_height)
+    png_bytes = s.screenshot.capture(region=region)
 
     if output_path:
         with open(output_path, "wb") as f:
@@ -333,7 +343,7 @@ def screenshot(output_path: str | None = None) -> dict:
     with open(gallery_path, "wb") as f:
         f.write(png_bytes)
 
-    return {"success": True, "image_base64": b64, "path": output_path, "gallery_path": gallery_path}
+    return {"success": True, "gallery_path": gallery_path}
 
 
 @mcp.tool()
@@ -342,17 +352,19 @@ def list_ui_elements(
     role: str | None = None,
     name: str | None = None,
     visible_only: bool = True,
+    max_results: int = 0,
 ) -> dict:
     """List UI elements from the accessibility tree.
 
     Args:
         role: Filter by role substring (e.g., "button", "text", "label").
         name: Filter by name/label substring.
-        visible_only: Only return visible elements.
+        visible_only: Only return visible elements (also skips invisible subtrees).
+        max_results: Stop after this many matches (0 = unlimited).
     """
     s = _require_app()
     tree = _require_accessibility(s)
-    elements = tree.list_elements(filter_role=role, filter_name=name, visible_only=visible_only)
+    elements = tree.list_elements(filter_role=role, filter_name=name, visible_only=visible_only, max_results=max_results)
     return {
         "success": True,
         "elements": [e.to_dict() for e in elements],
@@ -696,7 +708,6 @@ def _batch_dispatchers() -> dict:
 
     def _screenshot(s):
         png_bytes = s.screenshot.capture()
-        b64 = base64.b64encode(png_bytes).decode("ascii")
         gallery_dir = os.path.join(os.getcwd(), ".gui-user", "screenshots")
         os.makedirs(gallery_dir, exist_ok=True)
         from datetime import datetime
@@ -704,7 +715,7 @@ def _batch_dispatchers() -> dict:
         gallery_path = os.path.join(gallery_dir, f"{ts}.png")
         with open(gallery_path, "wb") as f:
             f.write(png_bytes)
-        return {"success": True, "image_base64": b64, "gallery_path": gallery_path}
+        return {"success": True, "gallery_path": gallery_path}
 
     def _wait(s, ms=500):
         time.sleep(ms / 1000.0)

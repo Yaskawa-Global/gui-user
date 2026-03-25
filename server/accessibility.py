@@ -123,11 +123,16 @@ except Exception as e:
         filter_role: str | None = None,
         filter_name: str | None = None,
         visible_only: bool = True,
+        max_results: int = 0,
     ) -> list[ElementInfo]:
-        """Enumerate UI elements, optionally filtered by role/name."""
+        """Enumerate UI elements, optionally filtered by role/name.
+
+        Args:
+            max_results: Stop after collecting this many matches (0 = unlimited).
+        """
         try:
             results = []
-            for node, depth in self._walk(self._app_node, 0):
+            for node, depth in self._walk(self._app_node, 0, skip_invisible=visible_only):
                 info = self._build_element_info(node, depth)
                 if visible_only and "visible" not in info.states:
                     continue
@@ -136,6 +141,8 @@ except Exception as e:
                 if filter_name and filter_name.lower() not in info.name.lower():
                     continue
                 results.append(info)
+                if max_results > 0 and len(results) >= max_results:
+                    break
             return results
         except Exception as e:
             raise AccessibilityError(f"Failed to list elements: {e}") from e
@@ -149,7 +156,7 @@ except Exception as e:
         """Find the nth element matching text and/or role. Returns None if not found."""
         try:
             match_count = 0
-            for node, depth in self._walk(self._app_node, 0):
+            for node, depth in self._walk(self._app_node, 0, skip_invisible=True):
                 info = self._build_element_info(node, depth)
                 if role and role.lower() not in info.role.lower():
                     continue
@@ -192,21 +199,46 @@ except Exception as e:
             raise AccessibilityError(f"Failed to get element at ({x}, {y}): {e}") from e
 
     def _find_app_node(self):
-        """Locate the application node by PID in the AT-SPI desktop."""
+        """Locate the application node by PID in the AT-SPI desktop.
+
+        When multiple AT-SPI app entries share the same PID (e.g. a splash
+        screen and a main window), prefer the one with the most children.
+        """
         desktop = self._atspi.get_desktop(0)
+        best = None
+        best_children = -1
         for i in range(desktop.get_child_count()):
             try:
                 app = desktop.get_child_at_index(i)
                 if app and app.get_process_id() == self._pid:
-                    return app
+                    count = app.get_child_count()
+                    if count > best_children:
+                        best = app
+                        best_children = count
             except Exception:
                 continue
-        return None
+        return best
 
-    def _walk(self, node, depth: int) -> Iterator[tuple]:
-        """Recursively yield (node, depth) for the entire subtree."""
+    def _walk(self, node, depth: int, skip_invisible: bool = False) -> Iterator[tuple]:
+        """Recursively yield (node, depth) for the entire subtree.
+
+        Args:
+            skip_invisible: If True, do not descend into nodes that lack
+                            the 'visible' or 'showing' state.
+        """
         if node is None or depth > _MAX_DEPTH:
             return
+
+        if skip_invisible and depth > 0:
+            try:
+                state_set = node.get_state_set()
+                visible = state_set.contains(self._atspi.StateType.VISIBLE)
+                showing = state_set.contains(self._atspi.StateType.SHOWING)
+                if not (visible or showing):
+                    return
+            except Exception:
+                pass
+
         yield (node, depth)
         try:
             count = node.get_child_count()
@@ -215,7 +247,7 @@ except Exception as e:
         for i in range(count):
             try:
                 child = node.get_child_at_index(i)
-                yield from self._walk(child, depth + 1)
+                yield from self._walk(child, depth + 1, skip_invisible=skip_invisible)
             except Exception:
                 continue
 
