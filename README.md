@@ -57,7 +57,6 @@ Or for a **single project only**, create `.mcp.json` in the project root:
 ```
 
 Restart VS Code (or reload the window) after adding the configuration.
-```
 
 ## Tools
 
