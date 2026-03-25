@@ -578,6 +578,164 @@ def wait_for_element(
 
 
 # ---------------------------------------------------------------------------
+# Batch
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def batch_actions(actions: list[dict]) -> dict:
+    """Execute a sequence of UI actions in one call, returning all results.
+
+    This avoids per-action round-trips for multi-step interactions.
+    Each action is a dict with an "action" key and parameters matching
+    the corresponding individual tool.
+
+    Supported actions:
+        {"action": "click", "x": int, "y": int, "button"?: str}
+        {"action": "click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
+        {"action": "double_click", "x": int, "y": int, "button"?: str}
+        {"action": "double_click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
+        {"action": "hover", "x": int, "y": int}
+        {"action": "hover_element", "text"?: str, "role"?: str, "index"?: int}
+        {"action": "type_text", "text": str}
+        {"action": "press_key", "key": str, "modifiers"?: list[str]}
+        {"action": "screenshot"}
+        {"action": "wait", "ms": int}
+        {"action": "wait_for_idle", "timeout"?: float}
+        {"action": "wait_for_element", "text"?: str, "role"?: str, "timeout"?: float}
+
+    Returns a list of results, one per action. Execution stops on the first
+    failure and remaining actions are skipped.
+
+    Example:
+        batch_actions([
+            {"action": "click_element", "text": "File", "role": "menu"},
+            {"action": "wait", "ms": 300},
+            {"action": "click_element", "text": "Save", "role": "menu item"},
+            {"action": "screenshot"},
+        ])
+    """
+    try:
+        s = _require_app()
+    except GuiUserError as e:
+        return {"success": False, "message": str(e), "results": []}
+
+    results = []
+    dispatchers = _batch_dispatchers()
+
+    for i, action_def in enumerate(actions):
+        action_name = action_def.get("action")
+        if not action_name:
+            results.append({"success": False, "message": f"Action {i}: missing 'action' key"})
+            return {"success": False, "message": f"Failed at action {i}", "results": results}
+
+        dispatcher = dispatchers.get(action_name)
+        if dispatcher is None:
+            results.append({"success": False, "message": f"Action {i}: unknown action {action_name!r}"})
+            return {"success": False, "message": f"Failed at action {i}", "results": results}
+
+        try:
+            params = {k: v for k, v in action_def.items() if k != "action"}
+            result = dispatcher(s, **params)
+            results.append(result)
+            if not result.get("success", True):
+                return {"success": False, "message": f"Failed at action {i}: {result.get('message', '')}", "results": results}
+        except GuiUserError as e:
+            results.append({"success": False, "message": str(e)})
+            return {"success": False, "message": f"Failed at action {i}: {e}", "results": results}
+
+    return {"success": True, "results": results}
+
+
+def _batch_dispatchers() -> dict:
+    """Map action names to functions that take (AppState, **params) → dict."""
+
+    def _click(s, x, y, button="left"):
+        s.input.click(x, y, button)
+        return {"success": True, "message": f"Clicked ({x}, {y})"}
+
+    def _click_element(s, text=None, role=None, index=0, button="left"):
+        tree = _require_accessibility(s)
+        elem = tree.find_element(text=text, role=role, index=index)
+        if elem is None:
+            return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+        s.input.click(*elem.center, button)
+        return {"success": True, "message": f"Clicked [{elem.role}] {elem.name!r} at {elem.center}"}
+
+    def _double_click(s, x, y, button="left"):
+        s.input.double_click(x, y, button)
+        return {"success": True, "message": f"Double-clicked ({x}, {y})"}
+
+    def _double_click_element(s, text=None, role=None, index=0, button="left"):
+        tree = _require_accessibility(s)
+        elem = tree.find_element(text=text, role=role, index=index)
+        if elem is None:
+            return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+        s.input.double_click(*elem.center, button)
+        return {"success": True, "message": f"Double-clicked [{elem.role}] {elem.name!r}"}
+
+    def _hover(s, x, y):
+        s.input.mouse_move(x, y)
+        return {"success": True, "message": f"Hovered ({x}, {y})"}
+
+    def _hover_element(s, text=None, role=None, index=0):
+        tree = _require_accessibility(s)
+        elem = tree.find_element(text=text, role=role, index=index)
+        if elem is None:
+            return {"success": False, "message": f"Element not found (text={text!r}, role={role!r})"}
+        s.input.mouse_move(*elem.center)
+        return {"success": True, "message": f"Hovered [{elem.role}] {elem.name!r}"}
+
+    def _type_text(s, text):
+        s.input.type_text(text)
+        return {"success": True, "message": f"Typed {len(text)} chars"}
+
+    def _press_key(s, key, modifiers=None):
+        s.input.press_key(key, modifiers)
+        mod_str = "+".join(modifiers) + "+" if modifiers else ""
+        return {"success": True, "message": f"Pressed {mod_str}{key}"}
+
+    def _screenshot(s):
+        png_bytes = s.screenshot.capture()
+        b64 = base64.b64encode(png_bytes).decode("ascii")
+        gallery_dir = os.path.join(os.getcwd(), ".gui-user", "screenshots")
+        os.makedirs(gallery_dir, exist_ok=True)
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+        gallery_path = os.path.join(gallery_dir, f"{ts}.png")
+        with open(gallery_path, "wb") as f:
+            f.write(png_bytes)
+        return {"success": True, "image_base64": b64, "gallery_path": gallery_path}
+
+    def _wait(s, ms=500):
+        time.sleep(ms / 1000.0)
+        return {"success": True, "message": f"Waited {ms}ms"}
+
+    def _wait_for_idle(s, timeout=5.0):
+        s.waiter.wait_for_idle(timeout=timeout)
+        return {"success": True, "message": "App is idle"}
+
+    def _wait_for_element(s, text=None, role=None, timeout=10.0):
+        tree = _require_accessibility(s)
+        elem = s.waiter.wait_for_element(tree, text=text, role=role, timeout=timeout)
+        return {"success": True, "element": elem.to_dict()}
+
+    return {
+        "click": _click,
+        "click_element": _click_element,
+        "double_click": _double_click,
+        "double_click_element": _double_click_element,
+        "hover": _hover,
+        "hover_element": _hover_element,
+        "type_text": _type_text,
+        "press_key": _press_key,
+        "screenshot": _screenshot,
+        "wait": _wait,
+        "wait_for_idle": _wait_for_idle,
+        "wait_for_element": _wait_for_element,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
