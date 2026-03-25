@@ -1,9 +1,7 @@
 {
   "mcpServers": {
     "gui-user": {
-      "command": "python3",
-      "args": ["-m", "server.main"],
-      "cwd": "/home/jungd/dev/gui-user"
+      "command": "gui-user-mcp"
     }
   }
 }
