@@ -1,0 +1,14 @@
+# gui-user: External Computer-Use MCP Server
+#
+# Python package dependencies (install via pip):
+mcp>=1.0.0
+PyGObject>=3.42.0
+Pillow>=9.0.0
+
+# System package dependencies (install via apt/dnf/pacman):
+#   xvfb          - virtual X11 framebuffer (apt: xvfb)
+#   xdotool       - X11 input injection     (apt: xdotool)
+#   at-spi2-core  - accessibility daemon     (apt: at-spi2-core)
+#   dbus          - D-Bus session bus        (apt: dbus)
+#   imagemagick   - screenshot capture       (apt: imagemagick)
+#   libgirepository1.0-dev - GObject introspection (apt: libgirepository1.0-dev)
