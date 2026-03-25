@@ -38,16 +38,23 @@ else
         fi
         echo "Found running x11vnc (pid=$VNC_PID) on port $PORT"
     else
-        # No x11vnc running — find an Xvfb display and start one
-        XVFB_DISPLAY=$(ps aux | grep '[X]vfb' | grep -oP ':\d+' | head -1 || true)
+        # No x11vnc running — find an Xvfb display and start one.
+        # Only match actual Xvfb processes (not Xwayland, Xorg, etc.)
+        XVFB_DISPLAY=$(pgrep -a -x Xvfb 2>/dev/null | grep -oP ' :\K\d+' | head -1 || true)
         if [ -z "$XVFB_DISPLAY" ]; then
-            echo "No Xvfb display found. Launch an app first via the MCP server."
+            echo "No Xvfb display found. Launch an app first via the MCP server"
+            echo "(use vnc=True in launch_app, or run this script after launch)."
             exit 1
         fi
-        echo "No x11vnc running. Starting one on display $XVFB_DISPLAY..."
+        XVFB_DISPLAY=":$XVFB_DISPLAY"
+        echo "No x11vnc running. Starting one on Xvfb display $XVFB_DISPLAY..."
         x11vnc -display "$XVFB_DISPLAY" -viewonly -shared -nopw -forever -noxdamage -q -autoport 5900 &
         sleep 1
         VNC_PID=$!
+        if ! kill -0 "$VNC_PID" 2>/dev/null; then
+            echo "x11vnc failed to start. Is the Xvfb display still running?"
+            exit 1
+        fi
         PORT=$(ss -tlnp 2>/dev/null | grep "pid=$VNC_PID" | grep -oP ':\K[0-9]+' | head -1 || echo 5900)
         echo "x11vnc started on port $PORT"
     fi
