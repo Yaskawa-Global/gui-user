@@ -32,7 +32,7 @@ This puts `gui-user-mcp` on your `$PATH` as the MCP server entry point.
 
 ### 3. Configure Claude Code
 
-Add to your **global** Claude Code settings (`~/.claude/settings.json`) so gui-user is available in all projects:
+Add to your **global** Claude Code MCP config (`~/.claude/.mcp.json`) so gui-user is available in all projects:
 
 ```json
 {
