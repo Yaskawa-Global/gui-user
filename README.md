@@ -32,7 +32,19 @@ This puts `gui-user-mcp` on your `$PATH` as the MCP server entry point.
 
 ### 3. Configure Claude Code
 
-Add to your **global** Claude Code MCP config (`~/.claude/.mcp.json`) so gui-user is available in all projects:
+Add gui-user as a **user-scope** MCP server (available in all projects):
+
+```bash
+claude mcp add gui-user -s user -- gui-user-mcp
+```
+
+Or for a **single project only**, run from the project directory:
+
+```bash
+claude mcp add gui-user -- gui-user-mcp
+```
+
+Alternatively, you can create `.mcp.json` in the project root (this is shared via source control):
 
 ```json
 {
@@ -44,19 +56,13 @@ Add to your **global** Claude Code MCP config (`~/.claude/.mcp.json`) so gui-use
 }
 ```
 
-Or for a **single project only**, create `.mcp.json` in the project root:
+Verify the server is connected:
 
-```json
-{
-  "mcpServers": {
-    "gui-user": {
-      "command": "gui-user-mcp"
-    }
-  }
-}
+```bash
+claude mcp list
 ```
 
-Restart VS Code (or reload the window) after adding the configuration.
+If using VS Code, reload the window (Ctrl+Shift+P → "Developer: Reload Window") after adding the server, then start a new conversation. Type `/mcp` in the chat panel to confirm gui-user appears.
 
 ## Tools
 
