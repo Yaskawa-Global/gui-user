@@ -38,7 +38,7 @@ Add to your `.mcp.json` or Claude Code settings:
 
 | Tool | Description |
 |---|---|
-| `launch_app(binary, args, env, working_dir, width, height, timeout)` | Launch any binary under a virtual X11 display |
+| `launch_app(binary, args, env, working_dir, width, height, timeout, display_mode, display)` | Launch any binary under an isolated Xvfb display or a visible local X11 display |
 | `close_app()` | Terminate the app and display |
 | `get_app_status()` | Check if app is running, get PID/exit code/stderr |
 | `screenshot(output_path?)` | Capture screen as base64 PNG |
@@ -59,8 +59,21 @@ Add to your `.mcp.json` or Claude Code settings:
 ## Example Workflow
 
 ```python
-# Launch any binary
+# Launch any binary in the default isolated Xvfb session
 launch_app(binary="/usr/bin/gnome-calculator")
+
+# Launch on the operator's visible X11 desktop instead
+launch_app(
+    binary="/usr/bin/gnome-calculator",
+    display_mode="local",
+)
+
+# Or target a specific local display explicitly
+launch_app(
+    binary="/usr/bin/gnome-calculator",
+    display_mode="local",
+    display=":1",
+)
 
 # Discover UI elements
 list_ui_elements()
@@ -92,7 +105,7 @@ AI Assistant (Claude)
     ▼
 MCP Server (main.py)
     │ Orchestrates:
-    ├── DisplayManager  (Xvfb + D-Bus + AT-SPI)
+    ├── DisplayManager  (Xvfb/local X11 + D-Bus + AT-SPI)
     ├── ProcessManager  (binary launch/monitor)
     ├── AccessibilityTree (AT-SPI2 element discovery)
     ├── ScreenshotCapture (ImageMagick import)
@@ -117,8 +130,18 @@ This project was forked from [qt-pilot](https://github.com/neatobandit0/qt-pilot
 ## Running Tests
 
 ```bash
-python3 -m unittest tests.test_integration -v
+python3 -m unittest tests.test_integration tests.test_local_display -v
 ```
+
+## Local Display Mode
+
+`display_mode="local"` reuses a real X11 display so the operator can watch the app while the MCP drives it.
+
+- This mode is opt-in. The default remains an isolated `Xvfb` session.
+- Local mode is intended for X11 or XWayland displays only.
+- Mouse, keyboard, and focus are shared with the operator, so runs are less deterministic.
+- `width` and `height` are ignored in local mode because the existing desktop geometry is reused.
+- For unattended or CI-style runs, prefer the default `Xvfb` mode.
 
 ## License
 

@@ -54,7 +54,11 @@ class AccessibilityTree:
         self._pid = pid
         self._display_env = display_env
 
-        # Must set env before importing/initializing AT-SPI
+        # Probe AT-SPI in a subprocess first — Atspi.init() can fatally
+        # abort the process (SIGTRAP) if the accessibility bus is unreachable.
+        self._probe_atspi_bus(display_env, pid)
+
+        # Safe to initialize in-process now
         os.environ.update(display_env)
 
         import gi
@@ -66,6 +70,47 @@ class AccessibilityTree:
         self._app_node = self._find_app_node()
         if self._app_node is None:
             raise AccessibilityError(f"App PID {pid} not found in AT-SPI tree")
+
+    @staticmethod
+    def _probe_atspi_bus(display_env: dict[str, str], pid: int) -> None:
+        """Probe AT-SPI bus in a subprocess to avoid fatal GLib aborts."""
+        import subprocess, sys
+        probe_code = """
+import os, sys
+os.environ.update(%(env)r)
+try:
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+    Atspi.init()
+    desktop = Atspi.get_desktop(0)
+    count = desktop.get_child_count()
+    # Check if our target PID is visible
+    for i in range(count):
+        app = desktop.get_child_at_index(i)
+        if app and app.get_process_id() == %(pid)d:
+            sys.exit(0)
+    # PID not found yet, but bus works
+    sys.exit(1)
+except Exception as e:
+    sys.exit(2)
+""" % {"env": display_env, "pid": pid}
+
+        env = {**os.environ, **display_env}
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return  # PID found in AT-SPI tree
+        if result.returncode == 1:
+            raise AccessibilityError(f"AT-SPI bus works but app PID {pid} not found in tree")
+        # returncode 2 or crash (signal)
+        detail = result.stderr.strip()[:200] if result.stderr else "unknown"
+        raise AccessibilityError(f"AT-SPI bus unreachable: {detail}")
 
     def refresh(self) -> None:
         """Re-find the app node in case the tree changed."""

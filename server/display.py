@@ -1,4 +1,4 @@
-"""Xvfb + D-Bus + AT-SPI session management."""
+"""Display session management for Xvfb and local X11 backends."""
 
 import atexit
 import logging
@@ -28,33 +28,55 @@ def _find_atspi_registryd() -> str | None:
 
 
 class DisplayManager:
-    """Manages Xvfb virtual display with D-Bus session and AT-SPI accessibility."""
+    """Manages X11 display sessions with D-Bus and AT-SPI accessibility."""
 
     def __init__(self):
         self._xvfb_process: subprocess.Popen | None = None
         self._dbus_process: subprocess.Popen | None = None
         self._atspi_process: subprocess.Popen | None = None
         self._display: str | None = None
+        self._display_mode: str | None = None
         self._dbus_address: str | None = None
+        self._warnings: list[str] = []
 
-    def start(self, width: int = 1280, height: int = 1024, depth: int = 24) -> str:
-        """Start Xvfb, D-Bus session daemon, and AT-SPI registry.
+    def start(
+        self,
+        width: int = 1280,
+        height: int = 1024,
+        depth: int = 24,
+        mode: str = "xvfb",
+        display: str | None = None,
+    ) -> str:
+        """Start the configured display backend, D-Bus session daemon, and AT-SPI registry.
 
         Returns the display string (e.g. ':99').
         """
-        if self._xvfb_process is not None:
+        if self._display is not None:
             raise DisplayError("Display already started")
 
-        # Find free display number
-        display_num = 99
-        while os.path.exists(f"/tmp/.X{display_num}-lock"):
-            display_num += 1
-        self._display = f":{display_num}"
+        self._display_mode = mode
+        self._warnings = []
 
         try:
-            self._start_xvfb(width, height, depth)
-            self._start_dbus()
-            self._start_atspi_registryd()
+            if mode == "xvfb":
+                self._display = self._allocate_xvfb_display()
+                self._start_xvfb(width, height, depth)
+                self._start_dbus()
+                self._start_atspi_registryd()
+            elif mode == "local":
+                self._display = self._resolve_local_display(display)
+                self._probe_local_display()
+                # Reuse the desktop's existing D-Bus session
+                self._dbus_address = os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                if not self._dbus_address:
+                    logger.warning("No DBUS_SESSION_BUS_ADDRESS in environment; AT-SPI may not work")
+                # Ensure AT-SPI registryd is running on the desktop session
+                self._ensure_atspi_registryd()
+                self._warnings.append(
+                    "Local display mode shares mouse, keyboard, and focus with the operator."
+                )
+            else:
+                raise DisplayError(f"Unsupported display mode: {mode}")
         except Exception:
             self.stop()
             raise
@@ -64,7 +86,7 @@ class DisplayManager:
         return self._display
 
     def stop(self) -> None:
-        """Stop all managed processes (AT-SPI, D-Bus, Xvfb) in reverse order."""
+        """Stop all managed processes (AT-SPI, D-Bus, Xvfb if owned) in reverse order."""
         for name, proc_attr in [
             ("at-spi2-registryd", "_atspi_process"),
             ("dbus-daemon", "_dbus_process"),
@@ -75,15 +97,27 @@ class DisplayManager:
                 self._terminate_process(name, proc)
                 setattr(self, proc_attr, None)
         self._display = None
+        self._display_mode = None
         self._dbus_address = None
+        self._warnings = []
 
     @property
     def display(self) -> str | None:
         return self._display
 
     @property
+    def display_mode(self) -> str | None:
+        return self._display_mode
+
+    @property
     def is_running(self) -> bool:
+        if self._display_mode == "local":
+            return self._display is not None
         return self._xvfb_process is not None and self._xvfb_process.poll() is None
+
+    @property
+    def warnings(self) -> list[str]:
+        return list(self._warnings)
 
     @property
     def env(self) -> dict[str, str]:
@@ -101,6 +135,12 @@ class DisplayManager:
             result["DBUS_SESSION_BUS_ADDRESS"] = self._dbus_address
         return result
 
+    def _allocate_xvfb_display(self) -> str:
+        display_num = 99
+        while os.path.exists(f"/tmp/.X{display_num}-lock"):
+            display_num += 1
+        return f":{display_num}"
+
     def _start_xvfb(self, width: int, height: int, depth: int) -> None:
         screen = f"{width}x{height}x{depth}"
         self._xvfb_process = subprocess.Popen(
@@ -112,6 +152,37 @@ class DisplayManager:
         if self._xvfb_process.poll() is not None:
             raise DisplayError(f"Xvfb failed to start on {self._display}")
         logger.debug(f"Xvfb started on {self._display} ({screen})")
+
+    def _resolve_local_display(self, display: str | None) -> str:
+        resolved = display or os.environ.get("DISPLAY")
+        if not resolved:
+            raise DisplayError(
+                "Local display mode requires DISPLAY to be set or an explicit display argument."
+            )
+        return resolved
+
+    def _probe_local_display(self) -> None:
+        env = {**os.environ, "DISPLAY": self._display}
+        try:
+            result = subprocess.run(
+                ["xdotool", "getmouselocation"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DisplayError(
+                f"Timed out probing local display {self._display}. "
+                "Check that the X11 display is reachable and authorized."
+            ) from exc
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            raise DisplayError(
+                f"Cannot access local display {self._display}: {detail}. "
+                "Check DISPLAY/XAUTHORITY and X11 access permissions."
+            )
 
     def _start_dbus(self) -> None:
         base_env = {**os.environ, "DISPLAY": self._display}
@@ -128,6 +199,38 @@ class DisplayManager:
             raise DisplayError("dbus-daemon did not produce a session bus address")
         self._dbus_address = line
         logger.debug(f"D-Bus session: {self._dbus_address}")
+
+    def _ensure_atspi_registryd(self) -> None:
+        """Ensure the AT-SPI registry daemon is running on the current D-Bus session.
+
+        For local mode: checks if org.a11y.Bus is already available, and if not,
+        starts at-spi2-registryd and enables accessibility.
+        """
+        child_env = {**os.environ, **self.env}
+        # Check if AT-SPI bus is already available
+        result = subprocess.run(
+            ["dbus-send", "--session", "--dest=org.a11y.Bus",
+             "--type=method_call", "--print-reply",
+             "/org/a11y/bus", "org.a11y.Bus.GetAddress"],
+            env=child_env, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            logger.debug("AT-SPI bus already available on desktop session")
+            return
+
+        logger.info("AT-SPI bus not found on desktop session; starting at-spi2-registryd")
+        self._start_atspi_registryd()
+
+        # Enable accessibility flag so GTK/Qt apps register
+        subprocess.run(
+            ["dbus-send", "--session", "--dest=org.a11y.Status",
+             "--type=method_call",
+             "/org/a11y/bus", "org.freedesktop.DBus.Properties.Set",
+             "string:org.a11y.Status", "string:IsEnabled",
+             "variant:boolean:true"],
+            env=child_env, capture_output=True, text=True, timeout=5,
+        )
+        logger.debug("Set org.a11y.Status.IsEnabled = true")
 
     def _start_atspi_registryd(self) -> None:
         path = _find_atspi_registryd()

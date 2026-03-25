@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
@@ -99,17 +100,21 @@ async def launch_app(
     width: int = 1280,
     height: int = 1024,
     timeout: float = 10.0,
+    display_mode: Literal["xvfb", "local"] = "xvfb",
+    display: str | None = None,
 ) -> dict:
-    """Launch any application under a virtual X11 display.
+    """Launch any application under an isolated or local X11 display.
 
     Args:
         binary: Path to executable or name on PATH (e.g., "my_qt_app", "python3").
         args: Command-line arguments for the binary.
         env: Extra environment variables (merged with display env).
         working_dir: Working directory for the process.
-        width: Virtual display width in pixels.
-        height: Virtual display height in pixels.
+        width: Virtual display width in pixels for Xvfb mode.
+        height: Virtual display height in pixels for Xvfb mode.
         timeout: Seconds to wait for the app to register with AT-SPI.
+        display_mode: "xvfb" for an isolated virtual display, "local" to reuse a visible X11 display.
+        display: Explicit X11 display string for local mode (e.g. ":0"). Defaults to inherited DISPLAY.
     """
     global _session
 
@@ -119,14 +124,25 @@ async def launch_app(
             close_app()
 
         dm = DisplayManager()
-        display = dm.start(width=width, height=height)
+        resolved_display = dm.start(
+            width=width,
+            height=height,
+            mode=display_mode,
+            display=display,
+        )
 
         # Merge environments: os.environ + display env + user overrides
         merged_env = {**os.environ, **dm.env, **(env or {})}
 
         pm = ProcessManager()
         pid = pm.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
-        logger.info(f"App launched: {binary} (pid={pid}, display={display})")
+        logger.info(
+            "App launched: %s (pid=%s, mode=%s, display=%s)",
+            binary,
+            pid,
+            dm.display_mode,
+            resolved_display,
+        )
 
         # Try to connect AT-SPI (retry until timeout)
         # Use asyncio.sleep to avoid blocking the MCP event loop
@@ -137,10 +153,16 @@ async def launch_app(
             if pm.poll() is not None:
                 stdout, stderr = pm.get_output()
                 pm.terminate()
+                failed_display_mode = dm.display_mode
+                failed_display = resolved_display
+                failed_warnings = dm.warnings
                 dm.stop()
                 return {
                     "success": False,
                     "message": f"App exited immediately. stderr: {stderr[:500]}",
+                    "display_mode": failed_display_mode,
+                    "display": failed_display,
+                    "warnings": failed_warnings,
                 }
             try:
                 accessibility = AccessibilityTree(pid=pid, display_env=dm.env)
@@ -155,16 +177,26 @@ async def launch_app(
             display=dm,
             process=pm,
             accessibility=accessibility,
-            input=InputController(display),
-            screenshot=ScreenshotCapture(display),
+            input=InputController(
+                resolved_display,
+                pid=pid,
+                activate_on_keyboard=(dm.display_mode == "local"),
+            ),
+            screenshot=ScreenshotCapture(resolved_display, pid=pid),
             waiter=IdleWaiter(pid),
         )
 
+        message = "App launched"
+        if accessibility is None:
+            message += " (screenshot-only mode)"
+
         return {
             "success": True,
-            "message": "App launched" + (" (screenshot-only mode)" if accessibility is None else ""),
+            "message": message,
             "pid": pid,
-            "display": display,
+            "display_mode": dm.display_mode,
+            "display": resolved_display,
+            "warnings": dm.warnings,
         }
     except GuiUserError as e:
         return {"success": False, "message": str(e)}
@@ -190,13 +222,14 @@ def get_app_status() -> dict:
     """Check if the application is running and get diagnostics."""
     if _session is None:
         return {"running": False, "pid": None, "exit_code": None,
-                "display": None, "stdout": "", "stderr": ""}
+                "display_mode": None, "display": None, "stdout": "", "stderr": ""}
 
     stdout, stderr = _session.process.get_output()
     return {
         "running": _session.process.is_running,
         "pid": _session.process.pid,
         "exit_code": _session.process.poll(),
+        "display_mode": _session.display.display_mode,
         "display": _session.display.display,
         "stdout": stdout[-500:] if stdout else "",
         "stderr": stderr[-500:] if stderr else "",

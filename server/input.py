@@ -5,6 +5,7 @@ import os
 import subprocess
 
 from .errors import InputError
+from .window import WindowTracker
 
 logger = logging.getLogger("gui-user.input")
 
@@ -54,8 +55,10 @@ _KEY_MAP = {
 class InputController:
     """Inject mouse and keyboard events via xdotool."""
 
-    def __init__(self, display: str):
+    def __init__(self, display: str, pid: int | None = None, activate_on_keyboard: bool = False):
         self._env = {**os.environ, "DISPLAY": display}
+        self._window_tracker = WindowTracker(display, pid) if pid is not None else None
+        self._activate_on_keyboard = activate_on_keyboard
 
     def click(self, x: int, y: int, button: str = "left") -> None:
         btn = _BUTTON_MAP.get(button, "1")
@@ -71,9 +74,11 @@ class InputController:
         self._run("mousemove", "--sync", str(x), str(y))
 
     def type_text(self, text: str, delay_ms: int = 12) -> None:
+        self._focus_target_window()
         self._run("type", "--clearmodifiers", "--delay", str(delay_ms), "--", text)
 
     def press_key(self, key: str, modifiers: list[str] | None = None) -> None:
+        self._focus_target_window()
         keysym = self._resolve_key(key)
         parts = []
         for mod in (modifiers or []):
@@ -88,6 +93,11 @@ class InputController:
             return _KEY_MAP[key]
         # Single char or raw keysym name — pass through
         return key
+
+    def _focus_target_window(self) -> None:
+        if not self._activate_on_keyboard or self._window_tracker is None:
+            return
+        self._window_tracker.activate_window()
 
     def _run(self, *args: str) -> None:
         try:

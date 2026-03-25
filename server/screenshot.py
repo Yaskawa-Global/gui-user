@@ -6,6 +6,7 @@ import os
 import subprocess
 
 from .errors import DisplayError
+from .window import WindowTracker
 
 logger = logging.getLogger("gui-user.screenshot")
 
@@ -13,12 +14,21 @@ logger = logging.getLogger("gui-user.screenshot")
 class ScreenshotCapture:
     """Capture screenshots from an Xvfb display."""
 
-    def __init__(self, display: str):
+    def __init__(self, display: str, pid: int | None = None):
         self._display = display
+        self._window_tracker = WindowTracker(display, pid) if pid is not None else None
 
     def capture(self) -> bytes:
         """Return PNG bytes of the screen (active window, or full screen fallback)."""
         env = {**os.environ, "DISPLAY": self._display}
+
+        if self._window_tracker is not None:
+            window_id = self._window_tracker.get_preferred_window_id()
+            if window_id:
+                png = self._import_window(window_id, env)
+                if png:
+                    logger.debug(f"Captured target window {window_id} ({len(png)} bytes)")
+                    return png
 
         # Try active window first
         try:
