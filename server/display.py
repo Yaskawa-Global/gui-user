@@ -121,8 +121,9 @@ class DisplayManager:
             stderr=subprocess.DEVNULL,
             env=base_env,
         )
-        # Read the bus address from the first line of stdout
+        # Read the bus address from the first line of stdout, then close the pipe
         line = self._dbus_process.stdout.readline().decode().strip()
+        self._dbus_process.stdout.close()
         if not line:
             raise DisplayError("dbus-daemon did not produce a session bus address")
         self._dbus_address = line

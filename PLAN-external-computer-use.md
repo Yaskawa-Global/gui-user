@@ -43,7 +43,7 @@ server/
 
 ---
 
-## Phase 1: Launch Layer (Display + Process)
+## Phase 1: Launch Layer (Display + Process) [COMPLETED]
 
 ### 1.1 `display.py` — Xvfb + D-Bus Session
 
@@ -76,7 +76,7 @@ server/
 
 ---
 
-## Phase 2: Observation Layer
+## Phase 2: Observation Layer [COMPLETED]
 
 ### 2.1 `accessibility.py` — AT-SPI2 Tree
 
@@ -103,7 +103,7 @@ server/
 
 ---
 
-## Phase 3: Interaction Layer
+## Phase 3: Interaction Layer [COMPLETED]
 
 ### 3.1 `input.py` — xdotool Input Injection
 
@@ -127,7 +127,7 @@ server/
 
 ---
 
-## Phase 4: MCP Server Rewrite (`main.py`)
+## Phase 4: MCP Server Rewrite (`main.py`) [COMPLETED]
 
 ### 4.1 Session Management
 - `AppSession` class holding all managers: `display_manager`, `process_manager`, `accessibility`, `input_controller`, `screenshot`, `idle_waiter`
@@ -162,7 +162,7 @@ server/
 
 ---
 
-## Phase 5: Testing & Verification
+## Phase 5: Testing & Verification [COMPLETED]
 
 ### 5.1 AT-SPI Spike (do first, in Phase 1.3)
 - Validate end-to-end: Xvfb + dbus + at-spi2 + Qt app → AT-SPI tree visible
@@ -188,7 +188,7 @@ server/
 
 ---
 
-## Phase 6: Cleanup
+## Phase 6: Cleanup [COMPLETED]
 
 - Delete `server/harness.py`
 - Remove all Unix socket IPC code from `main.py`
