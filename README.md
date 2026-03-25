@@ -11,8 +11,11 @@ Unlike in-process testing frameworks, gui-user works externally — it can drive
 ### System packages
 
 ```bash
-# Debian/Ubuntu
+# Debian/Ubuntu — required
 sudo apt install xvfb xdotool at-spi2-core dbus imagemagick libgirepository1.0-dev
+
+# Optional — for VNC observation of the headless display
+sudo apt install x11vnc tigervnc-viewer
 ```
 
 ### Python packages
@@ -38,8 +41,9 @@ Add to your `.mcp.json` or Claude Code settings:
 
 | Tool | Description |
 |---|---|
-| `launch_app(binary, args, env, working_dir, width, height, timeout, display_mode, display)` | Launch any binary under an isolated Xvfb display or a visible local X11 display |
-| `close_app()` | Terminate the app and display |
+| `launch_app(binary, args, env, working_dir, width, height, timeout, display_mode, display, vnc)` | Launch any binary under an isolated Xvfb display or a visible local X11 display |
+| `close_app()` | Close the app (display session stays alive for reuse) |
+| `stop_display()` | Tear down the display session (Xvfb, D-Bus, VNC) |
 | `get_app_status()` | Check if app is running, get PID/exit code/stderr |
 | `screenshot(output_path?)` | Capture screen as base64 PNG |
 | `list_ui_elements(role?, name?, visible_only?)` | Enumerate AT-SPI accessibility tree |
@@ -132,6 +136,41 @@ This project was forked from [qt-pilot](https://github.com/neatobandit0/qt-pilot
 ```bash
 python3 -m unittest tests.test_integration tests.test_local_display -v
 ```
+
+## Observing the Headless Display (VNC)
+
+Pass `vnc=True` to `launch_app` to start a view-only VNC server alongside the Xvfb display. This lets the operator watch what the AI is doing without interfering.
+
+```python
+launch_app(binary="my_app", vnc=True)
+# Response includes: "vnc_display": "localhost:5900"
+```
+
+To connect, run the helper script from a terminal:
+
+```bash
+./view-display.sh
+```
+
+The script auto-detects the running x11vnc and opens a VNC viewer. If x11vnc isn't running yet, it starts one on the first Xvfb display it finds.
+
+You can also connect manually: `vncviewer localhost:<port>`
+
+**Requirements**: `sudo apt install x11vnc tigervnc-viewer`
+
+### Display Lifecycle
+
+The display session (Xvfb + D-Bus + VNC) persists across app restarts. This means:
+
+- `launch_app()` creates the display on first call, reuses it on subsequent calls
+- `close_app()` terminates only the app — the display and VNC stay alive
+- `stop_display()` tears down everything (Xvfb, D-Bus, VNC)
+
+This lets the operator connect the VNC viewer once and watch across multiple app launch/close cycles.
+
+### Screenshot Gallery
+
+Every `screenshot()` call auto-saves a timestamped PNG to `.gui-user/screenshots/` in the current working directory. Browse this folder to review the full visual history of a session.
 
 ## Local Display Mode
 
