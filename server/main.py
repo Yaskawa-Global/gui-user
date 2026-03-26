@@ -310,6 +310,7 @@ def screenshot(
     region_y: int | None = None,
     region_width: int | None = None,
     region_height: int | None = None,
+    ocr: bool = False,
 ) -> dict:
     """Capture a screenshot of the application.
 
@@ -323,6 +324,9 @@ def screenshot(
         region_y: Y coordinate of crop region.
         region_width: Width of crop region.
         region_height: Height of crop region.
+        ocr: If True, run OCR on the screenshot and return text elements with
+             bounding boxes. Coordinates are in the screenshot's coordinate space
+             (adjusted for region offset if a region is specified).
     """
     s = _require_app()
     region = None
@@ -343,7 +347,21 @@ def screenshot(
     with open(gallery_path, "wb") as f:
         f.write(png_bytes)
 
-    return {"success": True, "gallery_path": gallery_path}
+    result = {"success": True, "gallery_path": gallery_path}
+
+    if ocr:
+        ocr_elements = s.screenshot.ocr(png_bytes)
+        # Adjust coordinates back to full-screen space if a region was used
+        if region is not None:
+            rx, ry = region[0], region[1]
+            for elem in ocr_elements:
+                elem["bounds"][0] += rx
+                elem["bounds"][1] += ry
+                elem["center"][0] += rx
+                elem["center"][1] += ry
+        result["ocr_elements"] = ocr_elements
+
+    return result
 
 
 @mcp.tool()
@@ -521,6 +539,50 @@ def hover_element(
 
 
 # ---------------------------------------------------------------------------
+# Interaction — Drag & Drop
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def drag(from_x: int, from_y: int, to_x: int, to_y: int, duration_ms: int = 500) -> dict:
+    """Drag from one position to another (press-drag-release).
+
+    Useful for drag-and-drop operations like moving items from a palette
+    onto a canvas.
+
+    Args:
+        from_x: X coordinate to start the drag (mouse down).
+        from_y: Y coordinate to start the drag (mouse down).
+        to_x: X coordinate to end the drag (mouse up).
+        to_y: Y coordinate to end the drag (mouse up).
+        duration_ms: Duration of the drag in milliseconds (default 500).
+    """
+    s = _require_app()
+    s.input.drag(from_x, from_y, to_x, to_y, duration_ms)
+    return {"success": True, "message": f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"}
+
+
+# ---------------------------------------------------------------------------
+# Interaction — Scroll
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_handle_errors
+def scroll(x: int, y: int, clicks: int = 3, direction: str = "down") -> dict:
+    """Scroll the mouse wheel at screen coordinates.
+
+    Args:
+        x: X coordinate to scroll at.
+        y: Y coordinate to scroll at.
+        clicks: Number of scroll clicks (default 3).
+        direction: "up" or "down".
+    """
+    s = _require_app()
+    s.input.scroll(x, y, clicks, direction)
+    return {"success": True, "message": f"Scrolled {direction} {clicks} clicks at ({x}, {y})"}
+
+
+# ---------------------------------------------------------------------------
 # Interaction — Keyboard
 # ---------------------------------------------------------------------------
 
@@ -608,6 +670,8 @@ def batch_actions(actions: list[dict]) -> dict:
         {"action": "double_click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
         {"action": "hover", "x": int, "y": int}
         {"action": "hover_element", "text"?: str, "role"?: str, "index"?: int}
+        {"action": "drag", "from_x": int, "from_y": int, "to_x": int, "to_y": int, "duration_ms"?: int}
+        {"action": "scroll", "x": int, "y": int, "clicks"?: int, "direction"?: str}
         {"action": "type_text", "text": str}
         {"action": "press_key", "key": str, "modifiers"?: list[str]}
         {"action": "screenshot"}
@@ -697,6 +761,14 @@ def _batch_dispatchers() -> dict:
         s.input.mouse_move(*elem.center)
         return {"success": True, "message": f"Hovered [{elem.role}] {elem.name!r}"}
 
+    def _drag(s, from_x, from_y, to_x, to_y, duration_ms=500):
+        s.input.drag(from_x, from_y, to_x, to_y, duration_ms)
+        return {"success": True, "message": f"Dragged from ({from_x}, {from_y}) to ({to_x}, {to_y})"}
+
+    def _scroll(s, x, y, clicks=3, direction="down"):
+        s.input.scroll(x, y, clicks, direction)
+        return {"success": True, "message": f"Scrolled {direction} {clicks} clicks at ({x}, {y})"}
+
     def _type_text(s, text):
         s.input.type_text(text)
         return {"success": True, "message": f"Typed {len(text)} chars"}
@@ -737,6 +809,8 @@ def _batch_dispatchers() -> dict:
         "double_click_element": _double_click_element,
         "hover": _hover,
         "hover_element": _hover_element,
+        "drag": _drag,
+        "scroll": _scroll,
         "type_text": _type_text,
         "press_key": _press_key,
         "screenshot": _screenshot,

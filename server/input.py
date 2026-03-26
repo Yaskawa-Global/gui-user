@@ -62,16 +62,47 @@ class InputController:
 
     def click(self, x: int, y: int, button: str = "left") -> None:
         btn = _BUTTON_MAP.get(button, "1")
-        self._run("mousemove", "--sync", str(x), str(y))
+        self._run("mousemove", str(x), str(y))
         self._run("click", btn)
 
     def double_click(self, x: int, y: int, button: str = "left") -> None:
         btn = _BUTTON_MAP.get(button, "1")
-        self._run("mousemove", "--sync", str(x), str(y))
+        self._run("mousemove", str(x), str(y))
         self._run("click", "--repeat", "2", "--delay", "50", btn)
 
     def mouse_move(self, x: int, y: int) -> None:
-        self._run("mousemove", "--sync", str(x), str(y))
+        self._run("mousemove", str(x), str(y))
+
+    def drag(self, from_x: int, from_y: int, to_x: int, to_y: int, duration_ms: int = 500) -> None:
+        """Press-drag-release from one position to another.
+
+        Args:
+            from_x, from_y: Start position (press down).
+            to_x, to_y: End position (release).
+            duration_ms: Duration of the drag movement in milliseconds.
+        """
+        self._run("mousemove", str(from_x), str(from_y))
+        self._run("mousedown", "1")
+        # Animate the drag over the duration
+        steps = max(duration_ms // 20, 5)
+        delay = duration_ms // steps
+        for i in range(1, steps + 1):
+            ix = from_x + (to_x - from_x) * i // steps
+            iy = from_y + (to_y - from_y) * i // steps
+            self._run("mousemove", "--delay", str(delay), str(ix), str(iy))
+        self._run("mouseup", "1")
+
+    def scroll(self, x: int, y: int, clicks: int = 3, direction: str = "down") -> None:
+        """Scroll the mouse wheel at the given position.
+
+        Args:
+            x, y: Position to scroll at.
+            clicks: Number of scroll clicks.
+            direction: "up" or "down".
+        """
+        button = "5" if direction == "down" else "4"
+        self._run("mousemove", str(x), str(y))
+        self._run("click", "--repeat", str(clicks), "--delay", "50", button)
 
     def type_text(self, text: str, delay_ms: int = 12) -> None:
         self._focus_target_window()

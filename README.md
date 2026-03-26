@@ -16,6 +16,9 @@ sudo apt install xvfb xdotool at-spi2-core dbus imagemagick libgirepository1.0-d
 
 # Optional — for VNC observation of the headless display
 sudo apt install x11vnc tigervnc-viewer
+
+# Optional — for OCR-based text detection in screenshots
+sudo apt install tesseract-ocr
 ```
 
 ### 2. Install gui-user
