@@ -40,7 +40,31 @@ logger = logging.getLogger("gui-user")
 check_dependencies()
 
 # Create MCP server
-mcp = FastMCP("gui-user")
+mcp = FastMCP("gui-user", instructions="""\
+External computer-use MCP server for launching, observing, and interacting
+with X11 GUI applications via AT-SPI accessibility tree and xdotool input.
+
+Typical workflow:
+1. launch_app(binary, vnc=True) — start the app on a virtual display
+2. wait_for_idle() — wait for the app to finish loading
+3. screenshot() or list_ui_elements() — observe the current state
+4. click_element(text=...) or click(x, y) — interact with the UI
+
+Key tips:
+- AT-SPI element names come from the app's Accessible properties. Use
+  list_ui_elements(role="button") to discover named elements, then
+  click_element(text="name") for reliable clicking.
+- When AT-SPI names are missing, use screenshot(ocr=True) to detect
+  text on screen and get pixel coordinates for click(x, y).
+- Use screenshot(grid=True) to overlay a coordinate grid for estimating
+  click positions visually.
+- screenshot() returns a file path — use the Read tool to view the image.
+- The display session persists across app restarts. Use close_app() to
+  restart the app without recreating the display. Use stop_display()
+  to tear down everything.
+- Use batch_actions([...]) to chain multiple UI actions in a single call,
+  avoiding per-action round-trips.
+""")
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +335,7 @@ def screenshot(
     region_width: int | None = None,
     region_height: int | None = None,
     ocr: bool = False,
+    grid: bool = False,
 ) -> dict:
     """Capture a screenshot of the application.
 
@@ -325,8 +350,9 @@ def screenshot(
         region_width: Width of crop region.
         region_height: Height of crop region.
         ocr: If True, run OCR on the screenshot and return text elements with
-             bounding boxes. Coordinates are in the screenshot's coordinate space
-             (adjusted for region offset if a region is specified).
+             bounding boxes. Coordinates are in full-screen space.
+        grid: If True, overlay a coordinate grid on the saved screenshot.
+              Grid labels show full-screen pixel coordinates, even for cropped regions.
     """
     s = _require_app()
     region = None
@@ -338,6 +364,12 @@ def screenshot(
         with open(output_path, "wb") as f:
             f.write(png_bytes)
 
+    # Optionally add grid overlay (uses full-screen coords for cropped regions)
+    save_bytes = png_bytes
+    if grid:
+        offset = (region[0], region[1]) if region else (0, 0)
+        save_bytes = s.screenshot.add_grid(png_bytes, spacing=100, offset=offset)
+
     # Auto-save to per-project gallery
     gallery_dir = os.path.join(os.getcwd(), ".gui-user", "screenshots")
     os.makedirs(gallery_dir, exist_ok=True)
@@ -345,7 +377,7 @@ def screenshot(
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
     gallery_path = os.path.join(gallery_dir, f"{ts}.png")
     with open(gallery_path, "wb") as f:
-        f.write(png_bytes)
+        f.write(save_bytes)
 
     result = {"success": True, "gallery_path": gallery_path}
 

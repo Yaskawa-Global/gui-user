@@ -81,6 +81,57 @@ class ScreenshotCapture:
         return buf.getvalue()
 
     @staticmethod
+    def add_grid(png_bytes: bytes, spacing: int = 100, offset: tuple[int, int] = (0, 0)) -> bytes:
+        """Draw a coordinate grid overlay on a screenshot.
+
+        Args:
+            png_bytes: PNG image data.
+            spacing: Grid line spacing in pixels.
+            offset: (x, y) offset for coordinate labels (e.g. region origin).
+
+        Returns PNG bytes with grid overlay.
+        """
+        from PIL import Image, ImageDraw, ImageFont
+
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        w, h = img.size
+        ox, oy = offset
+        line_color = (255, 0, 0, 100)      # semi-transparent red
+        label_color = (255, 255, 255, 240)  # near-opaque white for labels
+        label_bg = (180, 0, 0, 200)         # dark red background for readability
+
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+        except (IOError, OSError):
+            font = ImageFont.load_default()
+
+        # Vertical lines + top labels
+        for x in range(0, w, spacing):
+            draw.line([(x, 0), (x, h)], fill=line_color, width=1)
+            label = str(x + ox)
+            bbox = font.getbbox(label)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.rectangle([(x + 2, 1), (x + tw + 5, th + 4)], fill=label_bg)
+            draw.text((x + 3, 1), label, fill=label_color, font=font)
+
+        # Horizontal lines + left labels
+        for y in range(0, h, spacing):
+            draw.line([(0, y), (w, y)], fill=line_color, width=1)
+            label = str(y + oy)
+            bbox = font.getbbox(label)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.rectangle([(1, y + 2), (tw + 5, y + th + 5)], fill=label_bg)
+            draw.text((2, y + 2), label, fill=label_color, font=font)
+
+        result = Image.alpha_composite(img, overlay).convert("RGB")
+        buf = io.BytesIO()
+        result.save(buf, format="PNG")
+        return buf.getvalue()
+
+    @staticmethod
     def ocr(png_bytes: bytes, min_confidence: int = 40) -> list[dict]:
         """Run Tesseract OCR on PNG bytes and return text elements with bounding boxes.
 
