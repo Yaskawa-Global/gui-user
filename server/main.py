@@ -102,6 +102,9 @@ def _require_display() -> DisplaySession:
 def _require_app() -> AppState:
     if _app is None:
         raise AppNotRunning("No app is running. Call launch_app first.")
+    if not _app.process.is_running:
+        exit_code = _app.process.poll()
+        raise AppNotRunning(f"App has exited (exit code {exit_code}). Call launch_app to restart.")
     return _app
 
 
@@ -519,6 +522,51 @@ def click_element(
 
 @mcp.tool()
 @_handle_errors
+def click_text_on_screen(
+    text: str,
+    index: int = 0,
+    button: str = "left",
+    exact: bool = False,
+) -> dict:
+    """Find visible text on screen via OCR and click it.
+
+    Useful for clicking text that isn't exposed via AT-SPI, such as
+    list view items, labels, or any visible text on screen.
+
+    Args:
+        text: The text to find and click.
+        index: Which match to click if multiple found (0-based).
+        button: "left", "right", or "middle".
+        exact: If True, require exact match. If False (default), substring match.
+    """
+    s = _require_app()
+    png_bytes = s.screenshot.capture()
+    ocr_elements = s.screenshot.ocr(png_bytes)
+
+    matches = []
+    for elem in ocr_elements:
+        if exact:
+            if elem["text"].lower() == text.lower():
+                matches.append(elem)
+        else:
+            if text.lower() in elem["text"].lower():
+                matches.append(elem)
+
+    if not matches:
+        return {"success": False, "message": f"Text {text!r} not found on screen"}
+    if index >= len(matches):
+        return {"success": False, "message": f"Text {text!r} found {len(matches)} time(s), but index {index} requested"}
+
+    target = matches[index]
+    s.input.click(*target["center"], button)
+    return {
+        "success": True,
+        "message": f"Clicked text {target['text']!r} at {target['center']} (confidence {target['confidence']}%)",
+    }
+
+
+@mcp.tool()
+@_handle_errors
 def double_click(x: int, y: int, button: str = "left") -> dict:
     """Double-click at screen coordinates."""
     s = _require_app()
@@ -698,6 +746,7 @@ def batch_actions(actions: list[dict]) -> dict:
     Supported actions:
         {"action": "click", "x": int, "y": int, "button"?: str}
         {"action": "click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
+        {"action": "click_text_on_screen", "text": str, "index"?: int, "button"?: str, "exact"?: bool}
         {"action": "double_click", "x": int, "y": int, "button"?: str}
         {"action": "double_click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
         {"action": "hover", "x": int, "y": int}
@@ -769,6 +818,25 @@ def _batch_dispatchers() -> dict:
         s.input.click(*elem.center, button)
         return {"success": True, "message": f"Clicked [{elem.role}] {elem.name!r} at {elem.center}"}
 
+    def _click_text_on_screen(s, text, index=0, button="left", exact=False):
+        png_bytes = s.screenshot.capture()
+        ocr_elements = s.screenshot.ocr(png_bytes)
+        matches = []
+        for elem in ocr_elements:
+            if exact:
+                if elem["text"].lower() == text.lower():
+                    matches.append(elem)
+            else:
+                if text.lower() in elem["text"].lower():
+                    matches.append(elem)
+        if not matches:
+            return {"success": False, "message": f"Text {text!r} not found on screen"}
+        if index >= len(matches):
+            return {"success": False, "message": f"Text {text!r} found {len(matches)} time(s), but index {index} requested"}
+        target = matches[index]
+        s.input.click(*target["center"], button)
+        return {"success": True, "message": f"Clicked text {target['text']!r} at {target['center']}"}
+
     def _double_click(s, x, y, button="left"):
         s.input.double_click(x, y, button)
         return {"success": True, "message": f"Double-clicked ({x}, {y})"}
@@ -837,6 +905,7 @@ def _batch_dispatchers() -> dict:
     return {
         "click": _click,
         "click_element": _click_element,
+        "click_text_on_screen": _click_text_on_screen,
         "double_click": _double_click,
         "double_click_element": _double_click_element,
         "hover": _hover,
