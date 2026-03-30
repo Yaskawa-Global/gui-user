@@ -15,6 +15,10 @@ dependencies = [
     "Pillow>=9.0.0",
 ]
 
+[tool.setuptools]
+py-modules = ["gui_user"]
+packages = ["server"]
+
 [project.scripts]
 gui-user-mcp = "server.main:main"
 gui-user-view = "server.script_runner:view_display"

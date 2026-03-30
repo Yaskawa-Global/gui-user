@@ -585,6 +585,73 @@ def click_text_on_screen(
 
 @mcp.tool()
 @_handle_errors
+def find_text_on_screen(
+    text: str,
+    exact: bool = False,
+) -> dict:
+    """Find visible text on screen via OCR without clicking it.
+
+    Useful for verifying text is visible or getting its coordinates.
+
+    Args:
+        text: The text to find.
+        exact: If True, require exact match. If False (default), substring match.
+    """
+    s = _require_app()
+    png_bytes = s.screenshot.capture()
+    ocr_elements = s.screenshot.ocr(png_bytes)
+
+    matches = []
+    for elem in ocr_elements:
+        if exact:
+            if elem["text"].lower() == text.lower():
+                matches.append(elem)
+        else:
+            if text.lower() in elem["text"].lower():
+                matches.append(elem)
+
+    return {
+        "success": True,
+        "found": len(matches) > 0,
+        "count": len(matches),
+        "matches": matches,
+    }
+
+
+@mcp.tool()
+@_handle_errors
+def wait_for_text_visible(
+    text: str,
+    timeout: float = 10.0,
+    exact: bool = False,
+) -> dict:
+    """Poll until text appears on screen via OCR, or timeout.
+
+    Args:
+        text: The text to wait for.
+        timeout: Maximum seconds to wait.
+        exact: If True, require exact match. If False (default), substring match.
+    """
+    s = _require_app()
+    deadline = time.monotonic() + timeout
+
+    while time.monotonic() < deadline:
+        png_bytes = s.screenshot.capture()
+        ocr_elements = s.screenshot.ocr(png_bytes)
+        for elem in ocr_elements:
+            if exact:
+                if elem["text"].lower() == text.lower():
+                    return {"success": True, "found": True, "match": elem}
+            else:
+                if text.lower() in elem["text"].lower():
+                    return {"success": True, "found": True, "match": elem}
+        time.sleep(1.0)
+
+    return {"success": True, "found": False, "message": f"Text {text!r} not found after {timeout}s"}
+
+
+@mcp.tool()
+@_handle_errors
 def double_click(x: int, y: int, button: str = "left") -> dict:
     """Double-click at screen coordinates."""
     s = _require_app()
