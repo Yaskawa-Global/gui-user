@@ -174,19 +174,27 @@ except Exception as e:
     def get_element_at(self, x: int, y: int) -> ElementInfo | None:
         """Get the most specific element at screen coordinates (x, y)."""
         try:
-            # Strategy 1: AT-SPI hit test
-            comp = self._app_node.get_component_iface()
-            if comp:
-                hit = comp.get_accessible_at_point(
-                    x, y, self._atspi.CoordType.SCREEN
-                )
+            # Strategy 1: AT-SPI hit test (with timeout to avoid hangs)
+            try:
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+                def _hit_test():
+                    comp = self._app_node.get_component_iface()
+                    if comp:
+                        return comp.get_accessible_at_point(
+                            x, y, self._atspi.CoordType.SCREEN
+                        )
+                    return None
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    hit = pool.submit(_hit_test).result(timeout=3)
                 if hit:
                     return self._build_element_info(hit, -1)
+            except (FuturesTimeout, Exception) as e:
+                logger.debug(f"AT-SPI hit test failed or timed out: {e}")
 
             # Strategy 2: Manual scan — find deepest element containing point
             best = None
             best_depth = -1
-            for node, depth in self._walk(self._app_node, 0):
+            for node, depth in self._walk(self._app_node, 0, skip_invisible=True):
                 info = self._build_element_info(node, depth)
                 bx, by, bw, bh = info.bounds
                 if bw > 0 and bh > 0:
@@ -254,8 +262,8 @@ except Exception as e:
     def _build_element_info(self, node, depth: int) -> ElementInfo:
         """Extract all available information from an AT-SPI node."""
         role = self._safe(node.get_role_name, "unknown")
-        name = self._safe(node.get_name, "")
-        description = self._safe(node.get_description, "")
+        name = self._strip_html(self._safe(node.get_name, ""))
+        description = self._strip_html(self._safe(node.get_description, ""))
 
         # Bounds
         bounds = (0, 0, 0, 0)
@@ -326,6 +334,14 @@ except Exception as e:
             children_count=children_count,
             depth=depth,
         )
+
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        """Remove HTML tags from a string."""
+        if not text or '<' not in text:
+            return text
+        import re
+        return re.sub(r'<[^>]*>', '', text)
 
     @staticmethod
     def _safe(func, default):

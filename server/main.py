@@ -497,6 +497,24 @@ def click(x: int, y: int, button: str = "left") -> dict:
 
 @mcp.tool()
 @_handle_errors
+def long_press(x: int, y: int, duration_ms: int = 1000, button: str = "left") -> dict:
+    """Press and hold at screen coordinates for a duration, then release.
+
+    Useful for UI elements that require a long press (press-and-hold) to activate.
+
+    Args:
+        x: X coordinate.
+        y: Y coordinate.
+        duration_ms: How long to hold in milliseconds (default 1000).
+        button: "left", "right", or "middle".
+    """
+    s = _require_app()
+    s.input.long_press(x, y, duration_ms, button)
+    return {"success": True, "message": f"Long-pressed at ({x}, {y}) for {duration_ms}ms"}
+
+
+@mcp.tool()
+@_handle_errors
 def click_element(
     text: str | None = None,
     role: str | None = None,
@@ -745,6 +763,7 @@ def batch_actions(actions: list[dict]) -> dict:
 
     Supported actions:
         {"action": "click", "x": int, "y": int, "button"?: str}
+        {"action": "long_press", "x": int, "y": int, "duration_ms"?: int, "button"?: str}
         {"action": "click_element", "text"?: str, "role"?: str, "index"?: int, "button"?: str}
         {"action": "click_text_on_screen", "text": str, "index"?: int, "button"?: str, "exact"?: bool}
         {"action": "double_click", "x": int, "y": int, "button"?: str}
@@ -809,6 +828,10 @@ def _batch_dispatchers() -> dict:
     def _click(s, x, y, button="left"):
         s.input.click(x, y, button)
         return {"success": True, "message": f"Clicked ({x}, {y})"}
+
+    def _long_press(s, x, y, duration_ms=1000, button="left"):
+        s.input.long_press(x, y, duration_ms, button)
+        return {"success": True, "message": f"Long-pressed ({x}, {y}) for {duration_ms}ms"}
 
     def _click_element(s, text=None, role=None, index=0, button="left"):
         tree = _require_accessibility(s)
@@ -904,6 +927,7 @@ def _batch_dispatchers() -> dict:
 
     return {
         "click": _click,
+        "long_press": _long_press,
         "click_element": _click_element,
         "click_text_on_screen": _click_text_on_screen,
         "double_click": _double_click,

@@ -65,6 +65,15 @@ class InputController:
         self._run("mousemove", str(x), str(y))
         self._run("click", btn)
 
+    def long_press(self, x: int, y: int, duration_ms: int = 1000, button: str = "left") -> None:
+        """Press and hold at a position for a duration, then release."""
+        import time
+        btn = _BUTTON_MAP.get(button, "1")
+        self._run("mousemove", str(x), str(y))
+        self._run("mousedown", btn)
+        time.sleep(duration_ms / 1000.0)
+        self._run("mouseup", btn)
+
     def double_click(self, x: int, y: int, button: str = "left") -> None:
         btn = _BUTTON_MAP.get(button, "1")
         self._run("mousemove", str(x), str(y))
