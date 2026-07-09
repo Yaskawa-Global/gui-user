@@ -152,24 +152,183 @@ except Exception as e:
         text: str | None = None,
         role: str | None = None,
         index: int = 0,
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
     ) -> ElementInfo | None:
         """Find the nth element matching text and/or role. Returns None if not found."""
         try:
-            match_count = 0
-            for node, depth in self._walk(self._app_node, 0, skip_invisible=True):
-                info = self._build_element_info(node, depth)
-                if role and role.lower() not in info.role.lower():
-                    continue
-                if text and text.lower() not in info.name.lower():
-                    # Also check text content
-                    if text.lower() not in info.text.lower():
-                        continue
-                if match_count == index:
-                    return info
-                match_count += 1
-            return None
+            match = self._find_matching_node(
+                self._app_node,
+                0,
+                text=text,
+                role=role,
+                index=index,
+                exact=exact,
+                include_text=include_text,
+                max_depth=max_depth,
+            )
+            if match is None:
+                return None
+            node, depth = match
+            return self._build_element_info(node, depth)
         except Exception as e:
             raise AccessibilityError(f"Failed to find element: {e}") from e
+
+    def find_descendant(
+        self,
+        root_text: str | None = None,
+        root_role: str | None = None,
+        text: str | None = None,
+        role: str | None = None,
+        root_index: int = 0,
+        index: int = 0,
+        root_exact: bool = False,
+        exact: bool = False,
+        root_include_text: bool = True,
+        include_text: bool = True,
+        max_depth: int | None = None,
+        root_max_depth: int | None = None,
+    ) -> ElementInfo | None:
+        """Find the nth descendant of a matching root node."""
+        try:
+            root_match = self._find_matching_node(
+                self._app_node,
+                0,
+                text=root_text,
+                role=root_role,
+                index=root_index,
+                exact=root_exact,
+                include_text=root_include_text,
+                max_depth=root_max_depth,
+            )
+            if root_match is None:
+                return None
+
+            root_node, root_depth = root_match
+            for child_index in range(self._safe(root_node.get_child_count, 0)):
+                child = root_node.get_child_at_index(child_index)
+                if child is None:
+                    continue
+                child_max_depth = None if max_depth is None else max_depth - 1
+                match = self._find_matching_node(
+                    child,
+                    root_depth + 1,
+                    text=text,
+                    role=role,
+                    index=index,
+                    exact=exact,
+                    include_text=include_text,
+                    max_depth=child_max_depth,
+                )
+                if match is not None:
+                    node, depth = match
+                    return self._build_element_info(node, depth)
+            return None
+        except Exception as e:
+            raise AccessibilityError(f"Failed to find descendant: {e}") from e
+
+    def find_any_element(
+        self,
+        texts: list[str],
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> tuple[str, ElementInfo] | None:
+        """Find the first element matching any candidate label."""
+        try:
+            if not texts:
+                return None
+
+            role_lower = role.lower() if role else None
+            normalized = [(text, text.lower()) for text in texts]
+
+            for node, depth in self._walk(self._app_node, 0, skip_invisible=True):
+                if role_lower:
+                    node_role = self._node_role_name(node).lower()
+                    if role_lower not in node_role:
+                        continue
+
+                matched_text = self._match_any_text(
+                    node,
+                    normalized,
+                    exact=exact,
+                    include_text=include_text,
+                )
+                if matched_text is not None:
+                    return matched_text, self._build_element_info(node, depth)
+
+            return None
+        except Exception as e:
+            raise AccessibilityError(f"Failed to find any element: {e}") from e
+
+    def list_descendants(
+        self,
+        root_text: str | None = None,
+        root_role: str | None = None,
+        role: str | None = None,
+        name: str | None = None,
+        root_index: int = 0,
+        root_exact: bool = False,
+        exact: bool = False,
+        root_include_text: bool = True,
+        include_text: bool = True,
+        max_depth: int | None = None,
+        root_max_depth: int | None = None,
+        max_results: int = 0,
+    ) -> list[ElementInfo]:
+        """List descendants of a matching root node."""
+        try:
+            root_match = self._find_matching_node(
+                self._app_node,
+                0,
+                text=root_text,
+                role=root_role,
+                index=root_index,
+                exact=root_exact,
+                include_text=root_include_text,
+                max_depth=root_max_depth,
+            )
+            if root_match is None:
+                return []
+
+            root_node, root_depth = root_match
+            results = []
+            role_lower = role.lower() if role else None
+            name_lower = name.lower() if name else None
+
+            for child_index in range(self._safe(root_node.get_child_count, 0)):
+                child = root_node.get_child_at_index(child_index)
+                if child is None:
+                    continue
+                child_max_depth = None if max_depth is None else max_depth - 1
+                for node, depth in self._walk(
+                    child,
+                    root_depth + 1,
+                    skip_invisible=True,
+                    max_depth=child_max_depth,
+                ):
+
+                    if role_lower:
+                        node_role = self._node_role_name(node).lower()
+                        if role_lower not in node_role:
+                            continue
+
+                    if name_lower and not self._node_text_matches(
+                        node,
+                        name_lower,
+                        exact=exact,
+                        include_text=include_text,
+                    ):
+                        continue
+
+                    results.append(self._build_element_info(node, depth))
+                    if max_results > 0 and len(results) >= max_results:
+                        return results
+
+            return results
+        except Exception as e:
+            raise AccessibilityError(f"Failed to list descendants: {e}") from e
 
     def get_element_at(self, x: int, y: int) -> ElementInfo | None:
         """Get the most specific element at screen coordinates (x, y)."""
@@ -227,14 +386,23 @@ except Exception as e:
                 continue
         return best
 
-    def _walk(self, node, depth: int, skip_invisible: bool = False) -> Iterator[tuple]:
+    def _walk(
+        self,
+        node,
+        depth: int,
+        skip_invisible: bool = False,
+        max_depth: int | None = None,
+    ) -> Iterator[tuple]:
         """Recursively yield (node, depth) for the entire subtree.
 
         Args:
             skip_invisible: If True, do not descend into nodes that lack
                             the 'visible' or 'showing' state.
+            max_depth: Maximum relative depth from the starting node.
         """
         if node is None or depth > _MAX_DEPTH:
+            return
+        if max_depth is not None and max_depth < 0:
             return
 
         if skip_invisible and depth > 0:
@@ -248,6 +416,8 @@ except Exception as e:
                 pass
 
         yield (node, depth)
+        if max_depth == 0:
+            return
         try:
             count = node.get_child_count()
         except Exception:
@@ -255,7 +425,13 @@ except Exception as e:
         for i in range(count):
             try:
                 child = node.get_child_at_index(i)
-                yield from self._walk(child, depth + 1, skip_invisible=skip_invisible)
+                child_max_depth = None if max_depth is None else max_depth - 1
+                yield from self._walk(
+                    child,
+                    depth + 1,
+                    skip_invisible=skip_invisible,
+                    max_depth=child_max_depth,
+                )
             except Exception:
                 continue
 
@@ -334,6 +510,98 @@ except Exception as e:
             children_count=children_count,
             depth=depth,
         )
+
+    def _find_matching_node(
+        self,
+        root_node,
+        root_depth: int,
+        text: str | None = None,
+        role: str | None = None,
+        index: int = 0,
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
+    ):
+        match_count = 0
+        text_lower = text.lower() if text else None
+        role_lower = role.lower() if role else None
+        for node, depth in self._walk(root_node, root_depth, skip_invisible=True, max_depth=max_depth):
+            if role_lower:
+                node_role = self._node_role_name(node).lower()
+                if role_lower not in node_role:
+                    continue
+
+            if text_lower and not self._node_text_matches(
+                node,
+                text_lower,
+                exact=exact,
+                include_text=include_text,
+            ):
+                continue
+
+            if match_count == index:
+                return node, depth
+            match_count += 1
+        return None
+
+    def _node_role_name(self, node) -> str:
+        return self._safe(node.get_role_name, "unknown")
+
+    def _node_name(self, node) -> str:
+        return self._strip_html(self._safe(node.get_name, ""))
+
+    def _node_text(self, node) -> str:
+        try:
+            if node.get_text_iface():
+                char_count = self._atspi.Text.get_character_count(node)
+                if char_count > 0:
+                    return self._atspi.Text.get_text(node, 0, char_count)
+        except Exception:
+            pass
+        return ""
+
+    def _node_text_matches(self, node, text_lower: str, exact: bool, include_text: bool = True) -> bool:
+        name = self._node_name(node).lower()
+        if exact:
+            if text_lower == name:
+                return True
+        elif text_lower in name:
+            return True
+
+        if not include_text:
+            return False
+
+        value_text = self._node_text(node).lower()
+        if exact:
+            return text_lower == value_text
+        return text_lower in value_text
+
+    def _match_any_text(
+        self,
+        node,
+        normalized_texts: list[tuple[str, str]],
+        exact: bool,
+        include_text: bool = True,
+    ) -> str | None:
+        name = self._node_name(node).lower()
+        for original, lowered in normalized_texts:
+            if exact:
+                if lowered == name:
+                    return original
+            elif lowered in name:
+                return original
+
+        if not include_text:
+            return None
+
+        value_text = self._node_text(node).lower()
+        for original, lowered in normalized_texts:
+            if exact:
+                if lowered == value_text:
+                    return original
+            elif lowered in value_text:
+                return original
+        return None
 
     @staticmethod
     def _strip_html(text: str) -> str:

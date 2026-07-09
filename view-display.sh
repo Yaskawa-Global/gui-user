@@ -48,7 +48,9 @@ else
         fi
         XVFB_DISPLAY=":$XVFB_DISPLAY"
         echo "No x11vnc running. Starting one on Xvfb display $XVFB_DISPLAY..."
-        x11vnc -display "$XVFB_DISPLAY" -viewonly -shared -nopw -forever -noxdamage -q -autoport 5900 &
+        # env -u: x11vnc bails out if it sees a Wayland session, even for an Xvfb target
+        env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+            x11vnc -display "$XVFB_DISPLAY" -viewonly -shared -nopw -forever -noxdamage -q -autoport 5900 &
         sleep 1
         VNC_PID=$!
         if ! kill -0 "$VNC_PID" 2>/dev/null; then

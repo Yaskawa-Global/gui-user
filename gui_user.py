@@ -130,10 +130,24 @@ class GuiUser:
         """Wait for the app's CPU usage to settle."""
         self._waiter.wait_for_idle(timeout=timeout)
 
-    def wait_for_element(self, text: str | None = None, role: str | None = None, timeout: float = 10.0) -> ElementInfo:
+    def wait_for_element(
+        self,
+        text: str | None = None,
+        role: str | None = None,
+        timeout: float = 10.0,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> ElementInfo:
         """Poll until an AT-SPI element appears."""
-        self._require_accessibility()
-        return self._waiter.wait_for_element(self._accessibility, text=text, role=role, timeout=timeout)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            elem = self.get_element(text=text, role=role, exact=exact, include_text=include_text)
+            if elem is not None:
+                return elem
+            time.sleep(0.5)
+        raise GuiUserError(
+            f"Element not found before timeout: text={text!r}, role={role!r}, exact={exact}, include_text={include_text}"
+        )
 
     def wait_for_text_visible(self, text: str, timeout: float = 10.0, exact: bool = False) -> dict | None:
         """Poll until OCR finds text on screen. Returns the match or None on timeout."""
@@ -145,21 +159,36 @@ class GuiUser:
             time.sleep(1.0)
         return None
 
-    def wait_for_element_state(self, text: str, state: str, timeout: float = 10.0, role: str | None = None) -> bool:
+    def wait_for_element_state(
+        self,
+        text: str,
+        state: str,
+        timeout: float = 10.0,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> bool:
         """Poll until an AT-SPI element has a specific state (e.g. 'checked', 'enabled')."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            elem = self.get_element(text, role=role)
+            elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
             if elem and state in elem.states:
                 return True
             time.sleep(0.5)
         return False
 
-    def wait_for_element_gone(self, text: str, timeout: float = 10.0, role: str | None = None) -> bool:
+    def wait_for_element_gone(
+        self,
+        text: str,
+        timeout: float = 10.0,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> bool:
         """Poll until an AT-SPI element is no longer visible."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            elem = self.get_element(text, role=role)
+            elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
             if elem is None:
                 return True
             time.sleep(0.5)
@@ -177,48 +206,172 @@ class GuiUser:
             filter_role=role, filter_name=name, visible_only=visible_only, max_results=max_results
         )
 
-    def get_element(self, text: str | None = None, role: str | None = None, index: int = 0) -> ElementInfo | None:
+    def get_element(
+        self,
+        text: str | None = None,
+        role: str | None = None,
+        index: int = 0,
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
+    ) -> ElementInfo | None:
         """Find an AT-SPI element by text/role. Returns None if not found."""
         self._require_accessibility()
-        return self._accessibility.find_element(text=text, role=role, index=index)
+        return self._accessibility.find_element(
+            text=text,
+            role=role,
+            index=index,
+            exact=exact,
+            include_text=include_text,
+            max_depth=max_depth,
+        )
 
-    def find_any_element(self, texts: list[str], role: str | None = None) -> tuple[str, ElementInfo] | None:
+    def get_descendant(
+        self,
+        root_text: str | None = None,
+        root_role: str | None = None,
+        text: str | None = None,
+        role: str | None = None,
+        root_index: int = 0,
+        index: int = 0,
+        root_exact: bool = False,
+        exact: bool = False,
+        root_include_text: bool = True,
+        include_text: bool = True,
+        max_depth: int | None = None,
+        root_max_depth: int | None = None,
+    ) -> ElementInfo | None:
+        """Find an AT-SPI element under a matching root subtree."""
+        self._require_accessibility()
+        return self._accessibility.find_descendant(
+            root_text=root_text,
+            root_role=root_role,
+            text=text,
+            role=role,
+            root_index=root_index,
+            index=index,
+            root_exact=root_exact,
+            exact=exact,
+            root_include_text=root_include_text,
+            include_text=include_text,
+            max_depth=max_depth,
+            root_max_depth=root_max_depth,
+        )
+
+    def list_descendants(
+        self,
+        root_text: str | None = None,
+        root_role: str | None = None,
+        role: str | None = None,
+        name: str | None = None,
+        root_index: int = 0,
+        root_exact: bool = False,
+        exact: bool = False,
+        root_include_text: bool = True,
+        include_text: bool = True,
+        max_depth: int | None = None,
+        root_max_depth: int | None = None,
+        max_results: int = 0,
+    ) -> list[ElementInfo]:
+        """List AT-SPI descendants under a matching root subtree."""
+        self._require_accessibility()
+        return self._accessibility.list_descendants(
+            root_text=root_text,
+            root_role=root_role,
+            role=role,
+            name=name,
+            root_index=root_index,
+            root_exact=root_exact,
+            exact=exact,
+            root_include_text=root_include_text,
+            include_text=include_text,
+            max_depth=max_depth,
+            root_max_depth=root_max_depth,
+            max_results=max_results,
+        )
+
+    def find_any_element(
+        self,
+        texts: list[str],
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> tuple[str, ElementInfo] | None:
         """Find the first visible AT-SPI element whose text matches any candidate.
 
         Returns a tuple of `(matched_text, element)` using the candidate string that
         produced the match, or `None` if none of the candidates are found.
         """
         self._require_accessibility()
-        for text in texts:
-            elem = self._accessibility.find_element(text=text, role=role)
-            if elem is not None and "visible" in elem.states:
-                return (text, elem)
-        return None
+        return self._accessibility.find_any_element(
+            texts=texts,
+            role=role,
+            exact=exact,
+            include_text=include_text,
+        )
 
-    def is_element_visible(self, text: str, role: str | None = None) -> bool:
+    def is_element_visible(
+        self,
+        text: str,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
+    ) -> bool:
         """Check if an AT-SPI element with the given text is visible."""
         self._require_accessibility()
-        elem = self._accessibility.find_element(text=text, role=role)
+        elem = self._accessibility.find_element(
+            text=text,
+            role=role,
+            exact=exact,
+            include_text=include_text,
+            max_depth=max_depth,
+        )
         return elem is not None and "visible" in elem.states
 
-    def get_element_states(self, text: str, role: str | None = None) -> list[str]:
+    def get_element_states(
+        self,
+        text: str,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
+    ) -> list[str]:
         """Get the state list of an AT-SPI element (e.g. ['enabled', 'checked', 'visible'])."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text, max_depth=max_depth)
         return elem.states if elem else []
 
-    def get_element_value(self, text: str, role: str | None = None) -> float | None:
+    def get_element_value(
+        self,
+        text: str,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> float | None:
         """Get the numeric value of a slider/spinbox element."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
         return elem.value if elem else None
 
-    def get_element_bounds(self, text: str, role: str | None = None) -> tuple[int, int, int, int] | None:
+    def get_element_bounds(
+        self,
+        text: str,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> tuple[int, int, int, int] | None:
         """Get (x, y, width, height) bounds of an element."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
         return elem.bounds if elem else None
 
-    def get_element_center(self, text: str, role: str | None = None) -> tuple[int, int] | None:
+    def get_element_center(
+        self,
+        text: str,
+        role: str | None = None,
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> tuple[int, int] | None:
         """Get (x, y) center of an element."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
         return elem.center if elem else None
 
     def count_elements(self, role: str | None = None, name: str | None = None) -> int:
@@ -287,41 +440,76 @@ class GuiUser:
         """Get all text visible on screen (or in a region) via OCR."""
         return [elem["text"] for elem in self.ocr(region=region)]
 
-    def read_text_field(self, field_name: str) -> str | None:
+    def read_text_field(self, field_name: str, exact: bool = False, include_text: bool = True) -> str | None:
         """Read the current text content of a named text field via AT-SPI."""
         self._require_accessibility()
-        elem = self._accessibility.find_element(text=field_name, role="text")
+        elem = self._accessibility.find_element(
+            text=field_name,
+            role="text",
+            exact=exact,
+            include_text=include_text,
+        )
         return elem.text if elem else None
 
     # -----------------------------------------------------------------------
     # Assertion helpers
     # -----------------------------------------------------------------------
 
-    def assert_element_visible(self, text: str, role: str | None = None, message: str = "") -> ElementInfo:
+    def assert_element_visible(
+        self,
+        text: str,
+        role: str | None = None,
+        message: str = "",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> ElementInfo:
         """Assert an AT-SPI element is visible. Raises AssertionError if not."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
         if elem is None or "visible" not in elem.states:
             msg = message or f"Element not visible: text={text!r}, role={role!r}"
             raise AssertionError(msg)
         return elem
 
-    def assert_element_not_visible(self, text: str, role: str | None = None, message: str = "") -> None:
+    def assert_element_not_visible(
+        self,
+        text: str,
+        role: str | None = None,
+        message: str = "",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> None:
         """Assert an AT-SPI element is NOT visible."""
-        elem = self.get_element(text, role=role)
+        elem = self.get_element(text, role=role, exact=exact, include_text=include_text)
         if elem is not None and "visible" in elem.states:
             msg = message or f"Element unexpectedly visible: text={text!r}, role={role!r}"
             raise AssertionError(msg)
 
-    def assert_element_state(self, text: str, state: str, role: str | None = None, message: str = "") -> None:
+    def assert_element_state(
+        self,
+        text: str,
+        state: str,
+        role: str | None = None,
+        message: str = "",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> None:
         """Assert an element has a specific state (e.g. 'checked', 'enabled')."""
-        states = self.get_element_states(text, role=role)
+        states = self.get_element_states(text, role=role, exact=exact, include_text=include_text)
         if state not in states:
             msg = message or f"Element {text!r} does not have state {state!r} (has: {states})"
             raise AssertionError(msg)
 
-    def assert_element_not_state(self, text: str, state: str, role: str | None = None, message: str = "") -> None:
+    def assert_element_not_state(
+        self,
+        text: str,
+        state: str,
+        role: str | None = None,
+        message: str = "",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> None:
         """Assert an element does NOT have a specific state."""
-        states = self.get_element_states(text, role=role)
+        states = self.get_element_states(text, role=role, exact=exact, include_text=include_text)
         if state in states:
             msg = message or f"Element {text!r} unexpectedly has state {state!r}"
             raise AssertionError(msg)
@@ -338,9 +526,17 @@ class GuiUser:
             msg = message or f"Text unexpectedly visible on screen: {text!r}"
             raise AssertionError(msg)
 
-    def assert_element_value(self, text: str, expected: float, role: str | None = None, message: str = "") -> None:
+    def assert_element_value(
+        self,
+        text: str,
+        expected: float,
+        role: str | None = None,
+        message: str = "",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> None:
         """Assert an element's numeric value (e.g. slider)."""
-        actual = self.get_element_value(text, role=role)
+        actual = self.get_element_value(text, role=role, exact=exact, include_text=include_text)
         if actual != expected:
             msg = message or f"Element {text!r} value: expected {expected}, got {actual}"
             raise AssertionError(msg)
@@ -353,12 +549,67 @@ class GuiUser:
         """Click at screen coordinates."""
         self._input.click(x, y, button)
 
-    def click_element(self, text: str, role: str | None = None, index: int = 0, button: str = "left") -> None:
+    def click_element(
+        self,
+        text: str,
+        role: str | None = None,
+        index: int = 0,
+        button: str = "left",
+        exact: bool = False,
+        include_text: bool = True,
+        max_depth: int | None = None,
+    ) -> None:
         """Find an AT-SPI element and click its center."""
         self._require_accessibility()
-        elem = self._accessibility.find_element(text=text, role=role, index=index)
+        elem = self._accessibility.find_element(
+            text=text,
+            role=role,
+            index=index,
+            exact=exact,
+            include_text=include_text,
+            max_depth=max_depth,
+        )
         if elem is None:
-            raise GuiUserError(f"Element not found: text={text!r}, role={role!r}")
+            raise GuiUserError(f"Element not found: text={text!r}, role={role!r}, exact={exact}")
+        self._input.click(*elem.center, button)
+
+    def click_descendant(
+        self,
+        root_text: str | None = None,
+        root_role: str | None = None,
+        text: str | None = None,
+        role: str | None = None,
+        root_index: int = 0,
+        index: int = 0,
+        button: str = "left",
+        root_exact: bool = False,
+        exact: bool = False,
+        root_include_text: bool = True,
+        include_text: bool = True,
+        max_depth: int | None = None,
+        root_max_depth: int | None = None,
+    ) -> None:
+        """Find an AT-SPI descendant under a matching root subtree and click its center."""
+        self._require_accessibility()
+        elem = self._accessibility.find_descendant(
+            root_text=root_text,
+            root_role=root_role,
+            text=text,
+            role=role,
+            root_index=root_index,
+            index=index,
+            root_exact=root_exact,
+            exact=exact,
+            root_include_text=root_include_text,
+            include_text=include_text,
+            max_depth=max_depth,
+            root_max_depth=root_max_depth,
+        )
+        if elem is None:
+            raise GuiUserError(
+                "Descendant element not found: "
+                f"root_text={root_text!r}, root_role={root_role!r}, text={text!r}, role={role!r}, exact={exact}"
+            )
         self._input.click(*elem.center, button)
 
     def click_text_on_screen(self, text: str, index: int = 0, exact: bool = False, button: str = "left") -> None:
@@ -378,12 +629,26 @@ class GuiUser:
         """Double-click at coordinates."""
         self._input.double_click(x, y, button)
 
-    def double_click_element(self, text: str, role: str | None = None, index: int = 0, button: str = "left") -> None:
+    def double_click_element(
+        self,
+        text: str,
+        role: str | None = None,
+        index: int = 0,
+        button: str = "left",
+        exact: bool = False,
+        include_text: bool = True,
+    ) -> None:
         """Find an AT-SPI element and double-click its center."""
         self._require_accessibility()
-        elem = self._accessibility.find_element(text=text, role=role, index=index)
+        elem = self._accessibility.find_element(
+            text=text,
+            role=role,
+            index=index,
+            exact=exact,
+            include_text=include_text,
+        )
         if elem is None:
-            raise GuiUserError(f"Element not found: text={text!r}, role={role!r}")
+            raise GuiUserError(f"Element not found: text={text!r}, role={role!r}, exact={exact}")
         self._input.double_click(*elem.center, button)
 
     def hover(self, x: int, y: int) -> None:

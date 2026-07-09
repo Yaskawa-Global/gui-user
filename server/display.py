@@ -119,10 +119,16 @@ class DisplayManager:
         else:
             args.extend(["-autoport", "5900"])
 
+        # x11vnc 0.9.16 exits immediately if it sees a Wayland session in the
+        # environment, even when pointed at an Xvfb X11 display — scrub the vars.
+        vnc_env = dict(os.environ)
+        vnc_env.pop("WAYLAND_DISPLAY", None)
+        vnc_env.pop("XDG_SESSION_TYPE", None)
         self._vnc_process = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=vnc_env,
         )
         # Give x11vnc a moment to bind
         time.sleep(0.5)
