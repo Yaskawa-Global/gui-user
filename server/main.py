@@ -26,6 +26,7 @@ from .errors import AppNotRunning, GuiUserError
 from .input import InputController
 from .process import ProcessManager
 from .screenshot import ScreenshotCapture
+from .session import clear_session, write_session
 from .wait import IdleWaiter
 
 # Configure logging to stderr (NEVER stdout for stdio MCP servers)
@@ -240,6 +241,18 @@ async def launch_app(
             waiter=IdleWaiter(pid),
         )
 
+        # Record the session so a separate process (a CLI, a test runner) can attach to
+        # this same app instead of launching a second one.
+        session_path = write_session(
+            display=resolved_display,
+            display_mode=dm.display_mode,
+            dbus_address=dm.dbus_address,
+            app_pid=pid,
+            binary=binary,
+            working_dir=working_dir,
+            vnc_display=dm.vnc_display,
+        )
+
         message = "App launched"
         if accessibility is None:
             message += " (screenshot-only mode)"
@@ -251,6 +264,7 @@ async def launch_app(
             "display_mode": dm.display_mode,
             "display": resolved_display,
             "warnings": dm.warnings,
+            "session_file": session_path,
         }
         if dm.vnc_running:
             result["vnc_display"] = dm.vnc_display
@@ -265,6 +279,7 @@ def _close_app_only() -> None:
     if _app is not None:
         _app.process.terminate()
         _app = None
+    clear_session()
 
 
 def _stop_display_only() -> None:

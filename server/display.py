@@ -40,6 +40,7 @@ class DisplayManager:
         self._display_mode: str | None = None
         self._dbus_address: str | None = None
         self._warnings: list[str] = []
+        self._adopted = False
 
     def start(
         self,
@@ -48,8 +49,14 @@ class DisplayManager:
         depth: int = 24,
         mode: str = "xvfb",
         display: str | None = None,
+        detached: bool = False,
     ) -> str:
         """Start the configured display backend, D-Bus session daemon, and AT-SPI registry.
+
+        Args:
+            detached: Leave the session running when this process exits, instead of
+                tearing it down at exit. Use when a short-lived process starts a session
+                that something else (a CLI, a test runner) will attach() to later.
 
         Returns the display string (e.g. ':99').
         """
@@ -83,8 +90,33 @@ class DisplayManager:
             self.stop()
             raise
 
-        atexit.register(self.stop)
-        logger.info(f"Display session started: {self._display}")
+        if not detached:
+            atexit.register(self.stop)
+        logger.info(
+            f"Display session started: {self._display}" + (" (detached)" if detached else "")
+        )
+        return self._display
+
+    def adopt(
+        self,
+        display: str,
+        mode: str = "xvfb",
+        dbus_address: str | None = None,
+    ) -> str:
+        """Take on a display session started by another process, without owning it.
+
+        No processes are started, and stop() will not tear the session down — the
+        process that started it stays responsible for its lifetime.
+        """
+        if self._display is not None:
+            raise DisplayError("Display already started")
+
+        self._display = display
+        self._display_mode = mode
+        self._dbus_address = dbus_address
+        self._adopted = True
+        self._warnings = []
+        logger.info(f"Attached to existing display session: {display}")
         return self._display
 
     def start_vnc(self, port: int = 0) -> str:
@@ -172,7 +204,18 @@ class DisplayManager:
         return None
 
     def stop(self) -> None:
-        """Stop all managed processes (VNC, AT-SPI, D-Bus, Xvfb) in reverse order."""
+        """Stop all managed processes (VNC, AT-SPI, D-Bus, Xvfb) in reverse order.
+
+        An adopted session is only detached from — the process that started it owns it.
+        """
+        if self._adopted:
+            logger.info(f"Detaching from adopted display {self._display} (left running)")
+            self._display = None
+            self._display_mode = None
+            self._dbus_address = None
+            self._adopted = False
+            return
+
         for name, proc_attr in [
             ("x11vnc", "_vnc_process"),
             ("at-spi2-registryd", "_atspi_process"),
@@ -199,9 +242,17 @@ class DisplayManager:
 
     @property
     def is_running(self) -> bool:
-        if self._display_mode == "local":
+        if self._display_mode == "local" or self._adopted:
             return self._display is not None
         return self._xvfb_process is not None and self._xvfb_process.poll() is None
+
+    @property
+    def adopted(self) -> bool:
+        return self._adopted
+
+    @property
+    def dbus_address(self) -> str | None:
+        return self._dbus_address
 
     @property
     def warnings(self) -> list[str]:

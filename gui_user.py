@@ -25,6 +25,7 @@ from server.errors import GuiUserError
 from server.input import InputController
 from server.process import ProcessManager
 from server.screenshot import ScreenshotCapture
+from server.session import clear_session, read_session, write_session
 from server.wait import IdleWaiter
 
 
@@ -43,6 +44,8 @@ class GuiUser:
         display_mode: str = "xvfb",
         vnc: bool = False,
         screenshot_dir: str | None = None,
+        session_file: str | None = None,
+        detached: bool = False,
     ):
         """Launch an application and connect to it.
 
@@ -57,17 +60,73 @@ class GuiUser:
             display_mode: "xvfb" for virtual display, "local" for real display.
             vnc: Start VNC server for observation.
             screenshot_dir: Directory for auto-saved screenshots. Defaults to .gui-user/screenshots/.
+            session_file: Where to record the session descriptor so another process can
+                attach() to this app. Defaults to .gui-user/session.json.
+            detached: Leave the display and app running when this process exits, so a
+                later attach() can pick them up. Forfeits stdout/stderr capture.
         """
         self._display = DisplayManager()
-        self._resolved_display = self._display.start(width=width, height=height, mode=display_mode)
+        self._resolved_display = self._display.start(
+            width=width, height=height, mode=display_mode, detached=detached
+        )
 
         if vnc and display_mode != "local":
             self._display.start_vnc()
 
         merged_env = {**os.environ, **self._display.env, **(env or {})}
         self._process = ProcessManager()
-        self._pid = self._process.launch(binary, args=args or [], env=merged_env, working_dir=working_dir)
+        self._pid = self._process.launch(
+            binary,
+            args=args or [],
+            env=merged_env,
+            working_dir=working_dir,
+            capture_output=not detached,
+        )
 
+        self._wire(screenshot_dir, timeout)
+
+        self._session_file = write_session(
+            session_file,
+            display=self._resolved_display,
+            display_mode=display_mode,
+            dbus_address=self._display.dbus_address,
+            app_pid=self._pid,
+            binary=binary,
+            working_dir=working_dir,
+            vnc_display=self._display.vnc_display,
+        )
+
+    @classmethod
+    def attach(
+        cls,
+        session_file: str | None = None,
+        timeout: float = 5.0,
+        screenshot_dir: str | None = None,
+    ) -> "GuiUser":
+        """Attach to an app already launched by another process.
+
+        Reads the session descriptor written at launch (display, D-Bus address, PID) and
+        rebuilds the input/screenshot/accessibility handles against it. The display and
+        the app keep belonging to whoever started them: close() detaches rather than
+        tearing the session down.
+        """
+        data = read_session(session_file)
+
+        self = cls.__new__(cls)
+        self._display = DisplayManager()
+        self._resolved_display = self._display.adopt(
+            data["display"],
+            mode=data.get("display_mode") or "xvfb",
+            dbus_address=data.get("dbus_address"),
+        )
+        self._process = ProcessManager()
+        self._pid = self._process.adopt(int(data["app_pid"]))
+        self._session_file = session_file
+        self._wire(screenshot_dir, timeout)
+        return self
+
+    def _wire(self, screenshot_dir: str | None, timeout: float) -> None:
+        """Build the input/screenshot/wait/accessibility handles for the current app."""
         self._input = InputController(self._resolved_display, pid=self._pid)
         self._screenshot = ScreenshotCapture(self._resolved_display, pid=self._pid)
         self._waiter = IdleWaiter(self._pid)
@@ -75,18 +134,21 @@ class GuiUser:
         self._screenshot_dir = screenshot_dir or os.path.join(os.getcwd(), ".gui-user", "screenshots")
         os.makedirs(self._screenshot_dir, exist_ok=True)
 
-        # Try to connect AT-SPI
+        # Try to connect AT-SPI.  An app that is already up answers on the first attempt,
+        # so try before sleeping — attaching should not cost a second per call.
         self._accessibility: AccessibilityTree | None = None
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            time.sleep(1.0)
+        while True:
             if self._process.poll() is not None:
-                raise GuiUserError(f"App exited immediately (exit code {self._process.poll()})")
+                raise GuiUserError(f"App exited (exit code {self._process.poll()})")
             try:
                 self._accessibility = AccessibilityTree(pid=self._pid, display_env=self._display.env)
                 break
             except Exception:
                 pass
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(1.0)
 
     @property
     def pid(self) -> int:
@@ -113,14 +175,29 @@ class GuiUser:
     # -----------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the app and tear down the display."""
+        """Close the app and tear down the display.
+
+        On an attached session this only detaches — the app is left running, since the
+        process that launched it owns its lifetime. Use close_app() to end it explicitly.
+        """
+        if self.attached:
+            self._display.stop()
+            self._accessibility = None
+            return
         self._process.terminate()
         self._display.stop()
+        clear_session(self._session_file)
 
     def close_app(self) -> None:
         """Close the app but keep the display running."""
         self._process.terminate()
         self._accessibility = None
+        clear_session(self._session_file)
+
+    @property
+    def attached(self) -> bool:
+        """True if this session was attach()ed to an app launched elsewhere."""
+        return self._process.adopted
 
     # -----------------------------------------------------------------------
     # Wait
