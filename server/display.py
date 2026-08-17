@@ -175,23 +175,58 @@ class DisplayManager:
         logger.info(f"x11vnc started: {self._vnc_display} (view-only)")
         return self._vnc_display
 
-    def _detect_vnc_port(self) -> int:
-        """Detect the port x11vnc bound to."""
+    def _detect_vnc_port(self, attempts: int = 10) -> int:
+        """Detect the port x11vnc actually bound to (it is given -autoport, not a fixed one).
+
+        Matched by socket inode rather than by scanning for "a listener above 5900":
+        /proc/<pid>/net/tcp is the whole network namespace's socket table despite living
+        under the pid, so scanning it returns whatever unrelated process happens to be
+        listening on a high port -- a plausible-looking number that connects to nothing.
+        """
         if self._vnc_process is None:
             return 5900
-        # Check /proc/<pid>/net/tcp for listening ports
-        try:
-            import re
-            with open(f"/proc/{self._vnc_process.pid}/net/tcp") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) >= 4 and parts[3] == "0A":  # LISTEN state
-                        port = int(parts[1].split(":")[1], 16)
-                        if port >= 5900:
-                            return port
-        except Exception:
-            pass
+
+        for attempt in range(attempts):
+            inodes = self._socket_inodes(self._vnc_process.pid)
+            if inodes:
+                port = self._listening_port_for(inodes)
+                if port:
+                    return port
+            time.sleep(0.2)     # x11vnc may not have bound yet
+
+        logger.warning("Could not determine the x11vnc port; assuming 5900")
         return 5900
+
+    @staticmethod
+    def _socket_inodes(pid: int) -> set:
+        inodes = set()
+        try:
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                try:
+                    target = os.readlink(f"/proc/{pid}/fd/{fd}")
+                except OSError:
+                    continue
+                if target.startswith("socket:["):
+                    inodes.add(target[len("socket:["):-1])
+        except OSError:
+            pass
+        return inodes
+
+    @staticmethod
+    def _listening_port_for(inodes: set) -> int | None:
+        """The local port of a LISTENing socket owned by one of `inodes`."""
+        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(table) as f:
+                    next(f)                                  # header
+                    for line in f:
+                        parts = line.split()
+                        # local_address, state, ... inode
+                        if len(parts) > 9 and parts[3] == "0A" and parts[9] in inodes:
+                            return int(parts[1].split(":")[1], 16)
+            except (OSError, StopIteration, ValueError):
+                continue
+        return None
 
     @property
     def vnc_running(self) -> bool:
