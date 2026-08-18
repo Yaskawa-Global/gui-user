@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gui-user"
-version = "2.0.0"
+version = "2.1.0"
 description = "MCP server for external computer-use: launch, observe, and interact with any X11 application via AT-SPI2 and xdotool."
 readme = "README.md"
 license = {text = "MIT"}

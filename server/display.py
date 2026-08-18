@@ -41,6 +41,7 @@ class DisplayManager:
         self._dbus_address: str | None = None
         self._warnings: list[str] = []
         self._adopted = False
+        self._owns_adopted = False
 
     def start(
         self,
@@ -102,11 +103,17 @@ class DisplayManager:
         display: str,
         mode: str = "xvfb",
         dbus_address: str | None = None,
+        take_ownership: bool = False,
     ) -> str:
-        """Take on a display session started by another process, without owning it.
+        """Take on a display session started by another process.
 
-        No processes are started, and stop() will not tear the session down — the
-        process that started it stays responsible for its lifetime.
+        No processes are started. By default the session is not owned: stop() detaches and
+        the process that started it stays responsible for its lifetime.
+
+        `take_ownership` makes stop() tear it down instead, for the case where the starting
+        process is gone and nothing else can. A detached session outlives its launcher by
+        design, so without this there is no one left to end it and the sessions pile up. A
+        "local" display — the caller's own desktop — is never torn down whatever this says.
         """
         if self._display is not None:
             raise DisplayError("Display already started")
@@ -115,8 +122,10 @@ class DisplayManager:
         self._display_mode = mode
         self._dbus_address = dbus_address
         self._adopted = True
+        self._owns_adopted = take_ownership and mode != "local"
         self._warnings = []
-        logger.info(f"Attached to existing display session: {display}")
+        logger.info(f"Attached to existing display session: {display}"
+                    + (" (taking ownership)" if self._owns_adopted else ""))
         return self._display
 
     def start_vnc(self, port: int = 0) -> str:
@@ -241,14 +250,19 @@ class DisplayManager:
     def stop(self) -> None:
         """Stop all managed processes (VNC, AT-SPI, D-Bus, Xvfb) in reverse order.
 
-        An adopted session is only detached from — the process that started it owns it.
+        An adopted session is only detached from — the process that started it owns it —
+        unless it was adopted with take_ownership, in which case it is torn down here.
         """
         if self._adopted:
-            logger.info(f"Detaching from adopted display {self._display} (left running)")
+            if self._owns_adopted:
+                terminate_session_processes(self._display)
+            else:
+                logger.info(f"Detaching from adopted display {self._display} (left running)")
             self._display = None
             self._display_mode = None
             self._dbus_address = None
             self._adopted = False
+            self._owns_adopted = False
             return
 
         for name, proc_attr in [
@@ -284,6 +298,11 @@ class DisplayManager:
     @property
     def adopted(self) -> bool:
         return self._adopted
+
+    @property
+    def owns_adopted(self) -> bool:
+        """True if this process took responsibility for an adopted session's lifetime."""
+        return self._owns_adopted
 
     @property
     def dbus_address(self) -> str | None:
@@ -439,3 +458,77 @@ class DisplayManager:
             proc.wait(timeout=2)
         except Exception as e:
             logger.warning(f"Error terminating {name}: {e}")
+
+
+def session_processes(display: str) -> list[tuple[int, str]]:
+    """The (pid, name) of the processes making up a display session.
+
+    Used to end a session whose launching process is gone, so there are no Popen handles
+    left to terminate. Xvfb and x11vnc name the display on their command line; the D-Bus
+    and AT-SPI daemons are found by the DISPLAY they were started under, which is what
+    distinguishes them from the caller's own desktop daemons.
+    """
+    if not display:
+        return []
+
+    found: list[tuple[int, str]] = []
+    for pid_dir in os.listdir("/proc"):
+        if not pid_dir.isdigit():
+            continue
+        pid = int(pid_dir)
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().decode("utf-8", "replace").split("\0")
+        except OSError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        name = os.path.basename(argv[0])
+
+        if name in ("Xvfb", "x11vnc"):
+            if display in argv[1:]:
+                found.append((pid, name))
+        elif name in ("dbus-daemon", "at-spi2-registryd", "at-spi-bus-launcher"):
+            try:
+                with open(f"/proc/{pid}/environ", "rb") as f:
+                    env = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            if f"DISPLAY={display}\0" in env + "\0":
+                found.append((pid, name))
+    return found
+
+
+def terminate_session_processes(display: str, timeout: float = 3.0) -> int:
+    """End every process belonging to `display`. Returns how many were signalled."""
+    import signal
+
+    processes = session_processes(display)
+    if not processes:
+        logger.info(f"No processes found for display {display}")
+        return 0
+
+    # dependants first, so nothing is left talking to a display that has gone
+    order = {"x11vnc": 0, "at-spi2-registryd": 1, "at-spi-bus-launcher": 2,
+             "dbus-daemon": 3, "Xvfb": 4}
+    for pid, name in sorted(processes, key=lambda p: order.get(p[1], 9)):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            logger.warning(f"Not permitted to stop {name} ({pid}) on {display}")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline and session_processes(display):
+        time.sleep(0.1)
+
+    for pid, name in session_processes(display):
+        logger.warning(f"{name} ({pid}) did not exit, sending SIGKILL")
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    logger.info(f"Display session {display} stopped ({len(processes)} processes)")
+    return len(processes)

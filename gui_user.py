@@ -21,7 +21,7 @@ from dataclasses import asdict
 
 from server.accessibility import AccessibilityTree, ElementInfo
 from server.display import DisplayManager
-from server.errors import GuiUserError
+from server.errors import DisplayError, GuiUserError
 from server.input import InputController
 from server.process import ProcessManager
 from server.screenshot import ScreenshotCapture
@@ -73,17 +73,32 @@ class GuiUser:
         if vnc and display_mode != "local":
             self._display.start_vnc()
 
+        # remembered so relaunch_app() can repeat this launch on the same display
+        self._launch = {
+            "binary": binary, "args": args or [], "env": env or {},
+            "working_dir": working_dir, "detached": detached,
+            "display_mode": display_mode, "session_file": session_file,
+            "screenshot_dir": screenshot_dir, "timeout": timeout,
+        }
+
         merged_env = {**os.environ, **self._display.env, **(env or {})}
         self._process = ProcessManager()
-        self._pid = self._process.launch(
-            binary,
-            args=args or [],
-            env=merged_env,
-            working_dir=working_dir,
-            capture_output=not detached,
-        )
+        try:
+            self._pid = self._process.launch(
+                binary,
+                args=args or [],
+                env=merged_env,
+                working_dir=working_dir,
+                capture_output=not detached,
+            )
 
-        self._wire(screenshot_dir, timeout)
+            self._wire(screenshot_dir, timeout)
+        except Exception:
+            # An app that will not start would otherwise leave its display behind, and a
+            # detached one has no exit handler to catch it later: every failed attempt would
+            # cost another Xvfb.
+            self._display.stop()
+            raise
 
         self._session_file = write_session(
             session_file,
@@ -102,6 +117,7 @@ class GuiUser:
         session_file: str | None = None,
         timeout: float = 5.0,
         screenshot_dir: str | None = None,
+        take_ownership: bool = False,
     ) -> "GuiUser":
         """Attach to an app already launched by another process.
 
@@ -109,6 +125,10 @@ class GuiUser:
         rebuilds the input/screenshot/accessibility handles against it. The display and
         the app keep belonging to whoever started them: close() detaches rather than
         tearing the session down.
+
+        `take_ownership` transfers that responsibility to this process, so close() ends the
+        session for good. A detached launch outlives its launcher deliberately, which leaves
+        nobody able to end it — this is how a later process cleans one up.
         """
         data = read_session(session_file)
 
@@ -118,6 +138,7 @@ class GuiUser:
             data["display"],
             mode=data.get("display_mode") or "xvfb",
             dbus_address=data.get("dbus_address"),
+            take_ownership=take_ownership,
         )
         self._process = ProcessManager()
         self._pid = self._process.adopt(int(data["app_pid"]))
@@ -178,15 +199,62 @@ class GuiUser:
         """Close the app and tear down the display.
 
         On an attached session this only detaches — the app is left running, since the
-        process that launched it owns its lifetime. Use close_app() to end it explicitly.
+        process that launched it owns its lifetime. Use close_app() to end it explicitly,
+        or attach(take_ownership=True) to make this end the whole session.
         """
-        if self.attached:
+        if self.attached and not self._display.owns_adopted:
             self._display.stop()
             self._accessibility = None
             return
         self._process.terminate()
         self._display.stop()
+        self._accessibility = None
         clear_session(self._session_file)
+
+    def relaunch_app(self, env: dict[str, str] | None = None,
+                     timeout: float | None = None) -> int:
+        """Restart the application on the display this session already has.
+
+        The display, its D-Bus session and the AT-SPI registry all stay up, so whatever is
+        watching -- a VNC viewer, a screen recording -- survives the restart instead of
+        having the window vanish from under it. Everything about the launch is repeated
+        except `env`, which replaces the extra environment if given (for settings that only
+        take effect at startup).
+
+        Returns the new PID. Not available on an attached session: the app belongs to
+        whoever launched it.
+        """
+        if self.attached:
+            raise DisplayError("cannot relaunch an app this session only attached to")
+
+        launch = self._launch
+        if env is not None:
+            launch["env"] = env
+
+        self._process.terminate()
+        merged_env = {**os.environ, **self._display.env, **launch["env"]}
+        self._pid = self._process.launch(
+            launch["binary"],
+            args=launch["args"],
+            env=merged_env,
+            working_dir=launch["working_dir"],
+            capture_output=not launch["detached"],
+        )
+
+        self._wire(launch["screenshot_dir"],
+                   launch["timeout"] if timeout is None else timeout)
+
+        self._session_file = write_session(
+            launch["session_file"],
+            display=self._resolved_display,
+            display_mode=launch["display_mode"],
+            dbus_address=self._display.dbus_address,
+            app_pid=self._pid,
+            binary=launch["binary"],
+            working_dir=launch["working_dir"],
+            vnc_display=self._display.vnc_display,
+        )
+        return self._pid
 
     def close_app(self) -> None:
         """Close the app but keep the display running."""

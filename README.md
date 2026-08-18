@@ -162,6 +162,39 @@ This project was forked from [qt-pilot](https://github.com/neatobandit0/qt-pilot
 | Interaction | In-process QTest | External xdotool |
 | Architecture | Monkeypatch + socket IPC | External observation + input injection |
 
+## Sharing a session between processes
+
+A launched session normally lives and dies inside the process that started it. Two options
+change that, so a short-lived command can drive an app something else started:
+
+```python
+app = GuiUser("/path/to/app", detached=True)   # outlives this process
+...
+app2 = GuiUser.attach()                        # another process, same app
+app2.click(100, 200)
+app2.close()                                   # detaches; the app keeps running
+```
+
+`detached=True` leaves the display and app running at exit and writes a session descriptor
+(`.gui-user/session.json`: display, D-Bus address, PID). `GuiUser.attach()` reads it and
+rebuilds the input, screenshot and accessibility handles against the running app.
+
+Ownership follows from that. An attached session does not own what it attached to, so
+`close()` only detaches. Two ways to end a detached session:
+
+```python
+GuiUser.attach(take_ownership=True).close()    # claim it, then end app + display
+app.close_app()                                # end the app, keep the display up
+app.relaunch_app(env={...})                    # restart the app on the same display
+```
+
+`take_ownership=True` matters because a detached launch has no exit handler: without someone
+claiming it later, nothing tears the display down and the Xvfbs accumulate one per launch.
+
+`relaunch_app()` restarts the application while keeping the display, its D-Bus session and the
+AT-SPI registry — so a VNC viewer watching the run stays connected across the restart instead
+of losing its window.
+
 ## Running Tests
 
 ```bash
