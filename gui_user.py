@@ -15,6 +15,7 @@ Example:
     app.close()
 """
 
+import logging
 import os
 import time
 from dataclasses import asdict
@@ -26,6 +27,8 @@ from server.input import InputController
 from server.process import ProcessManager
 from server.screenshot import ScreenshotCapture
 from server.session import clear_session, read_session, write_session
+
+logger = logging.getLogger("gui-user")
 from server.wait import IdleWaiter
 
 
@@ -46,6 +49,7 @@ class GuiUser:
         screenshot_dir: str | None = None,
         session_file: str | None = None,
         detached: bool = False,
+        reuse_display: bool = True,
     ):
         """Launch an application and connect to it.
 
@@ -64,13 +68,37 @@ class GuiUser:
                 attach() to this app. Defaults to .gui-user/session.json.
             detached: Leave the display and app running when this process exits, so a
                 later attach() can pick them up. Forfeits stdout/stderr capture.
+            reuse_display: Take over the display from a previous session if it is still
+                running, rather than creating another, and stop any others that are up. Set
+                False only to deliberately run a second display alongside the first.
         """
         self._display = DisplayManager()
-        self._resolved_display = self._display.start(
-            width=width, height=height, mode=display_mode, detached=detached
-        )
 
-        if vnc and display_mode != "local":
+        #  Reuse the display from a previous launch if one is still up, and sweep any others.
+        #  Virtual displays are meant to be one at a time: a detached session outlives the
+        #  command that started it by design, so without this every launch that nothing later
+        #  claims leaves an Xvfb behind. They accumulate invisibly until a viewer attaches to
+        #  the wrong one and shows an empty screen.
+        reused = None
+        if display_mode == "xvfb" and reuse_display:
+            reused = self._reusable_display(session_file)
+
+        if reused is not None:
+            self._resolved_display = self._display.adopt(
+                reused["display"], mode="xvfb",
+                dbus_address=reused.get("dbus_address"), take_ownership=True,
+            )
+        else:
+            self._resolved_display = self._display.start(
+                width=width, height=height, mode=display_mode, detached=detached
+            )
+
+        if display_mode == "xvfb":
+            swept = DisplayManager.sweep_other_displays(keep=self._resolved_display)
+            if swept:
+                logger.info(f"Swept {len(swept)} stale display(s): {', '.join(swept)}")
+
+        if vnc and display_mode != "local" and not self._display.vnc_display:
             self._display.start_vnc()
 
         # remembered so relaunch_app() can repeat this launch on the same display
@@ -110,6 +138,30 @@ class GuiUser:
             working_dir=working_dir,
             vnc_display=self._display.vnc_display,
         )
+
+    @staticmethod
+    def _reusable_display(session_file: str | None) -> dict | None:
+        """The previous session's display, if it is still running and can be taken over.
+
+        Reuse is only safe when the D-Bus address is known -- AT-SPI is reached through it,
+        and an orphaned Xvfb with no descriptor cannot tell us what its address was. Such a
+        display is swept rather than adopted.
+        """
+        try:
+            data = read_session(session_file)
+        except Exception:
+            return None
+
+        display = data.get("display")
+        if not display or data.get("display_mode") != "xvfb" or not data.get("dbus_address"):
+            return None
+
+        live = {d for _, d in DisplayManager.running_xvfb_displays()}
+        if display not in live:
+            return None
+
+        logger.info(f"Reusing display {display} from the previous session")
+        return data
 
     @classmethod
     def attach(

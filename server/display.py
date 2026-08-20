@@ -4,6 +4,7 @@ import atexit
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import time
 
@@ -327,6 +328,54 @@ class DisplayManager:
         if self._dbus_address:
             result["DBUS_SESSION_BUS_ADDRESS"] = self._dbus_address
         return result
+
+    @staticmethod
+    def running_xvfb_displays() -> list:
+        """Every Xvfb display this user has running, as (pid, display), oldest first.
+
+        Only displays numbered from 99 up are reported -- that is the range allocated here,
+        and it keeps the sweep away from an Xvfb someone else's tooling is running.
+        """
+        found = []
+        try:
+            pids = subprocess.run(["pgrep", "-x", "-u", str(os.getuid()), "Xvfb"],
+                                  capture_output=True, text=True).stdout.split()
+        except OSError:
+            return found
+
+        for pid in pids:
+            try:
+                argv = open(f"/proc/{pid}/cmdline", "rb").read().decode().split("\0")
+                started = os.stat(f"/proc/{pid}").st_ctime
+            except OSError:
+                continue
+            display = next((a for a in argv if a.startswith(":") and a[1:].isdigit()), None)
+            if display is None or int(display[1:]) < 99:
+                continue
+            found.append((started, int(pid), display))
+
+        return [(pid, display) for _, pid, display in sorted(found)]
+
+    @classmethod
+    def sweep_other_displays(cls, keep: str | None = None) -> list:
+        """Stop every virtual display except `keep`; returns the displays stopped.
+
+        Virtual displays are meant to be one at a time. A detached session deliberately
+        outlives the command that started it, so a launch that nothing later claims leaves
+        its display behind -- and they accumulate silently until a viewer attaches to the
+        wrong one and shows an empty screen.
+        """
+        stopped = []
+        for pid, display in cls.running_xvfb_displays():
+            if display == keep:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                stopped.append(display)
+                logger.info(f"Swept stale display {display} (pid {pid})")
+            except (ProcessLookupError, PermissionError) as e:
+                logger.debug(f"Could not stop {display} (pid {pid}): {e}")
+        return stopped
 
     def _allocate_xvfb_display(self) -> str:
         display_num = 99
