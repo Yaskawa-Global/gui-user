@@ -3,6 +3,7 @@
 import logging
 import os
 import subprocess
+import time
 
 from .errors import InputError
 from .window import WindowTracker
@@ -92,13 +93,16 @@ class InputController:
         """
         self._run("mousemove", str(from_x), str(from_y))
         self._run("mousedown", "1")
-        # Animate the drag over the duration
+        # Step the pointer there rather than jumping: a flick gesture is only recognised
+        # if the app sees intermediate motion, and the velocity it infers comes from the
+        # spacing in time. xdotool mousemove has no --delay of its own, so pace it here.
         steps = max(duration_ms // 20, 5)
-        delay = duration_ms // steps
+        pause = duration_ms / steps / 1000.0
         for i in range(1, steps + 1):
             ix = from_x + (to_x - from_x) * i // steps
             iy = from_y + (to_y - from_y) * i // steps
-            self._run("mousemove", "--delay", str(delay), str(ix), str(iy))
+            self._run("mousemove", "--sync", str(ix), str(iy))
+            time.sleep(pause)
         self._run("mouseup", "1")
 
     def scroll(self, x: int, y: int, clicks: int = 3, direction: str = "down") -> None:
