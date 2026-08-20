@@ -46,6 +46,7 @@ class GuiUser:
         timeout: float = 15.0,
         display_mode: str = "xvfb",
         vnc: bool = False,
+        vnc_scale: str | float | None = None,
         screenshot_dir: str | None = None,
         session_file: str | None = None,
         detached: bool = False,
@@ -63,6 +64,8 @@ class GuiUser:
             timeout: Seconds to wait for AT-SPI registration.
             display_mode: "xvfb" for virtual display, "local" for real display.
             vnc: Start VNC server for observation.
+            vnc_scale: Shrink the VNC stream, e.g. 0.8 -- for watching a display taller than
+                the monitor. The display itself keeps its real size.
             screenshot_dir: Directory for auto-saved screenshots. Defaults to .gui-user/screenshots/.
             session_file: Where to record the session descriptor so another process can
                 attach() to this app. Defaults to .gui-user/session.json.
@@ -99,7 +102,7 @@ class GuiUser:
                 logger.info(f"Swept {len(swept)} stale display(s): {', '.join(swept)}")
 
         if vnc and display_mode != "local" and not self._display.vnc_display:
-            self._display.start_vnc()
+            self._display.start_vnc(scale=vnc_scale)
 
         # remembered so relaunch_app() can repeat this launch on the same display
         self._launch = {

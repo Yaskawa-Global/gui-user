@@ -129,11 +129,14 @@ class DisplayManager:
                     + (" (taking ownership)" if self._owns_adopted else ""))
         return self._display
 
-    def start_vnc(self, port: int = 0) -> str:
+    def start_vnc(self, port: int = 0, scale: str | float | None = None) -> str:
         """Start x11vnc in view-only mode for operator observation.
 
         Args:
             port: VNC port (0 = auto-select). VNC viewers connect to this port.
+            scale: Shrink (or enlarge) the *stream*, e.g. 0.8 or "4/5". The display keeps its
+                real pixel size and the app under test is unaffected -- only the picture sent
+                to viewers changes. For watching a display taller than the monitor.
 
         Returns the VNC display string (e.g. "localhost:5900").
         """
@@ -156,6 +159,8 @@ class DisplayManager:
             "-noxdamage",
             "-q",
         ]
+        if scale:
+            args.extend(["-scale", str(scale)])
         if port > 0:
             args.extend(["-rfbport", str(port)])
         else:
